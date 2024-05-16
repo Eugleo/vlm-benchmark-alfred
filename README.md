@@ -1,0 +1,1 @@
+# Processing ALFRED for a VLM Benchmark

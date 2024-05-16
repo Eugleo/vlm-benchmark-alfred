@@ -1,0 +1,14 @@
+[project]
+dependencies = ["moviepy", "plotnine", "typer"]
+name = "vlm-benchmark"
+version = "0.0.1"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+alfred = "main:app"
