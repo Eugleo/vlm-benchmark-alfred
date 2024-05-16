@@ -1,5 +1,13 @@
 [project]
-dependencies = ["moviepy", "plotnine", "typer"]
+dependencies = [
+    "moviepy",
+    "plotnine",
+    "typer",
+    "ipython",
+    "ipykernel",
+    "polars",
+    "pyarrow",
+]
 name = "vlm-benchmark"
 version = "0.0.1"
 

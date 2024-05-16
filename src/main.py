@@ -1,8 +1,20 @@
+from pathlib import Path
+from typing import Annotated
+
 import typer
+from alfred import utils
 
 app = typer.Typer()
 
 
 @app.command()
-def generate():
-    activities = [Activity.from_file(p) for p in path.glob("**/traj_data.json")]
+def generate(
+    metadata: Annotated[str, typer.Argument()] = "metadata",
+    output: Annotated[
+        str, typer.Argument()
+    ] = "/Users/eugen/Downloads/Projects/mats/vlm-benchmark",
+    dry_run: Annotated[bool, typer.Option()] = False,
+    levels: Annotated[int, typer.Option()] = 6,
+):
+    metadata_path = Path(metadata)
+    trajectories = utils.load_normalized_trajectories(metadata_path)

@@ -1,6 +1,5 @@
 import itertools
 import json
-from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -44,7 +43,7 @@ class LowLevelAction:
             object1 = None
 
         if action in ["PutObject"]:
-            object1 = js["api_action"]["receptacleObjectId"].split("|")[0]
+            object2 = js["api_action"]["receptacleObjectId"].split("|")[0]
         else:
             object2 = None
 
@@ -105,10 +104,14 @@ class HighLevelAction:
             object1 = js["discrete_action"]["args"][0]
         else:
             object1 = js["planner_action"]["coordinateObjectId"][0]
+        if object1 not in object.id_to_str:
+            raise ValueError(f"Unknown object id: {object1}")
         object1 = object.id_to_str[object1]
 
         if action in ["PutObject", "HeatObject", "CoolObject"]:
             object2 = js["planner_action"]["coordinateReceptacleObjectId"][0]
+            if object2 not in object.id_to_str:
+                raise ValueError(f"Unknown object id: {object2}")
             object2 = object.id_to_str[object2]
         else:
             object2 = None
@@ -216,9 +219,9 @@ class Trajectory:
                 high_to_low.setdefault(img["high_idx"], []).append(img["low_idx"])
                 low_to_images.setdefault(img["low_idx"], []).append(i)
 
-            action_count = len(js["turk_annotations"]["anns"]["high_descs"][0])
+            action_count = len(js["turk_annotations"]["anns"][0]["high_descs"])
             descriptions = [
-                [desc[i] for desc in js["turk_annotations"]["anns"]["high_descs"]]
+                [desc["high_descs"][i] for desc in js["turk_annotations"]["anns"]]
                 for i in range(action_count)
             ]
 
@@ -253,17 +256,6 @@ class Trajectory:
                 ],
                 _images_path=images_path,
             )
-
-
-def permute_trajectories(trajectories: list[Trajectory]) -> list[Trajectory]:
-    return [
-        t
-        for trajectory in trajectories
-        for t in [
-            trajectory.with_modified_actions(list(actions))
-            for actions in itertools.permutations(trajectory.actions)
-        ]
-    ]
 
 
 def shorten_trajectories(trajectories: list[Trajectory], to: int) -> list["Trajectory"]:
