@@ -1,4 +1,3 @@
-import itertools
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,6 +59,10 @@ class HighLevelAction:
     action: str
     object1: str
     object2: Optional[str] = None
+
+    # Only used for substitutions
+    # If None, we inherit the image path from the video we're in
+    _images_path: Optional[Path] = None
 
     def __hash__(self) -> int:
         return hash((self.action, self.object1, self.object2))
@@ -161,24 +164,14 @@ class Trajectory:
 
     @property
     def video(self) -> ImageSequenceClip:
-        clip = VideoFileClip(str(self._images_path))
-        frames_data = []
-        fps = clip.fps  # get frames per second
-
-        frames = [
-            img
-            for hla in self.actions
-            for lla in hla.low_level_actions
-            for img in lla.images
-        ]
-        for frame_index in frames:
-            t = frame_index / fps  # convert frame index to timestamp
-            frame = clip.get_frame(t)  # get frame data
-            frames_data.append(frame)
-
-        # Create a new clip from frames data
-        new_clip = ImageSequenceClip(frames_data, fps=fps)
-        return new_clip
+        clip_cache, frames = {}, []
+        for hla in self.actions:
+            path = hla._images_path or self._images_path
+            clip = clip_cache.setdefault(path, VideoFileClip(str(path)))
+            frame_indices = [img for lla in hla.low_level_actions for img in lla.images]
+            fps = clip.fps
+            frames += [clip.get_frame(i / fps) for i in frame_indices]
+        return ImageSequenceClip(frames, fps=fps)
 
     def substitute(self, index: int, action: HighLevelAction) -> "Trajectory":
         if index > len(self):
@@ -216,7 +209,7 @@ class Trajectory:
 
             high_to_low, low_to_images = {}, {}
             for i, img in enumerate(js["images"]):
-                high_to_low.setdefault(img["high_idx"], []).append(img["low_idx"])
+                high_to_low.setdefault(img["high_idx"], set()).add(img["low_idx"])
                 low_to_images.setdefault(img["low_idx"], []).append(i)
 
             action_count = len(js["turk_annotations"]["anns"][0]["high_descs"])
@@ -233,7 +226,10 @@ class Trajectory:
                 HighLevelAction.from_json(
                     action,
                     description,
-                    [low_level_actions[i] for i in high_to_low[action["high_idx"]]],
+                    [
+                        low_level_actions[i]
+                        for i in sorted(list(high_to_low[action["high_idx"]]))
+                    ],
                 )
                 for action, description in zip(js["plan"]["high_pddl"], descriptions)
             ]

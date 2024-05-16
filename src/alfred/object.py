@@ -468,3 +468,14 @@ plausible_action_objects = {
     ],
     "ToggleObject": [(["floor lamp", "desk lamp"], [None])],
 }
+
+actions = [
+    "SliceObject",
+    "PickupObject",
+    "GotoLocation",
+    "CoolObject",
+    "PutObject",
+    "CleanObject",
+    "HeatObject",
+    "ToggleObject",
+]

@@ -6,7 +6,7 @@ from copy import deepcopy
 
 import yaml
 
-from alfred.trajectory import HighLevelAction, Trajectory, permute_trajectories
+from alfred.trajectory import HighLevelAction, Trajectory
 
 
 class Task:
@@ -20,14 +20,36 @@ class Task:
         self.name = name
         self.trajectories = trajectories
         if descriptions is None:
-            descriptions = [t.description for t in trajectories]
+            descriptions = list(set(t.description for t in trajectories))
         self.descriptions = descriptions
+
+    @property
+    def _used_concepts(self):
+        objects = set(
+            [a.object1 for t in self.trajectories for a in t.actions]
+            + [a.object2 for t in self.trajectories for a in t.actions]
+        )
+        high_level_actions = set(
+            [a.action for t in self.trajectories for a in t.actions]
+        )
+        low_level_actions = set(
+            [
+                lla.action
+                for t in self.trajectories
+                for hla in t.actions
+                for lla in hla.low_level_actions
+            ]
+        )
+        return {
+            "objects": [o for o in objects if o],
+            "high_level_actions": list(high_level_actions),
+            "low_level_actions": list(low_level_actions),
+        }
 
     def write(self, output_dir) -> str:
         tasks_dir = output_dir / "tasks" / "alfred" / self.prefix
         tasks_dir.mkdir(parents=True, exist_ok=True)
         videos_dir = output_dir / "videos" / "alfred" / self.prefix / self.name
-        videos_dir.mkdir(parents=True, exist_ok=True)
 
         description_to_label = {
             d: f"label_{i}" for i, d in enumerate(self.descriptions)
@@ -37,7 +59,12 @@ class Task:
         # Task definition
         with open(tasks_dir / f"{self.name}.yaml", "w") as f:
             yaml.dump(
-                {"label_prompts": label_to_description, "prompt_gpt": PROMPT_GPT}, f
+                {
+                    "label_prompts": label_to_description,
+                    "prompt_gpt": PROMPT_GPT,
+                    "concepts": self._used_concepts,
+                },
+                f,
             )
 
         videos = []
@@ -45,8 +72,11 @@ class Task:
         # TODO Could be made more efficient by only having one copy of each video
         for trajectory in self.trajectories:
             video_name = f"{trajectory.trial_id}_{uuid.uuid4()}.mp4"
-            trajectory.video.write_videofile(str(videos_dir / video_name), logger=None)
             label = description_to_label[trajectory.description]
+            (videos_dir / label).mkdir(parents=True, exist_ok=True)
+            trajectory.video.write_videofile(
+                str(videos_dir / label / video_name), logger=None
+            )
             videos.append({"path": f"{dir}/{self.name}/{video_name}", "label": label})
 
         # Task data
@@ -59,15 +89,16 @@ class Task:
     def create_permuted(trajectories: list[Trajectory], label_count: int):
         master = trajectories[0]
         permuted_trajectories, seen = deepcopy(trajectories), {tuple(master.actions)}
+        label_count -= 1
 
         for permutation in itertools.permutations(range(len(master))):
             if label_count <= 0:
                 break
 
-            master_actions = tuple(master.actions[i] for i in permutation)
-            if master_actions in seen:
+            actions = tuple(master.actions[i] for i in permutation)
+            if actions in seen:
                 continue
-            seen.add(master_actions)
+            seen.add(actions)
             label_count -= 1
 
             for trajectory in trajectories:
@@ -83,21 +114,26 @@ class Task:
     @staticmethod
     def create_substituted(
         trajectories: list[Trajectory],
-        action_library: list[HighLevelAction],
+        action_library: dict[str, list[HighLevelAction]],
         label_count: int,
     ):
         master = trajectories[0]
-        substituted_trajectories, seen = deepcopy(trajectories), {tuple(master.actions)}
+        substituted_trajectories, seen = deepcopy(trajectories), {}
 
-        while label_count > 0:
+        for _ in range(label_count - 1):
             index = random.randint(0, len(master) - 1)
-            if master_actions in seen:
-                continue
-            seen.add(master_actions)
-            label_count -= 1
-
-            for trajectory in trajectories:
-                substituted_trajectories.append(trajectory)
+            master_action = master.actions[index]
+            alternative_action = random.choice(
+                [
+                    a
+                    for a in action_library[master_action.action]
+                    if a not in seen.get(index, {})
+                ]
+            )
+            seen.setdefault(index, set()).add(alternative_action)
+            substituted_trajectories += [
+                t.substitute(index, alternative_action) for t in trajectories
+            ]
 
         return Task(
             prefix=f"level_{len(master)}/substituted",

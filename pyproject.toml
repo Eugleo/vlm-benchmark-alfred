@@ -7,6 +7,7 @@ dependencies = [
     "ipykernel",
     "polars",
     "pyarrow",
+    "PyYAML",
 ]
 name = "vlm-benchmark"
 version = "0.0.1"
