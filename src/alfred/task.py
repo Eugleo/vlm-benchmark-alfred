@@ -2,10 +2,13 @@ import itertools
 import json
 import random
 import uuid
+from collections import Counter
 from copy import deepcopy
 
 import yaml
 
+from alfred import utils
+from alfred.object import plausible_action_objects
 from alfred.trajectory import HighLevelAction, Trajectory
 
 
@@ -22,6 +25,13 @@ class Task:
         if descriptions is None:
             descriptions = list(set(t.description for t in trajectories))
         self.descriptions = descriptions
+        self._check_classes()
+
+    def _check_classes(self):
+        if len(self.descriptions) < 2:
+            raise ValueError(f"Not enough classes for a task: {self.descriptions}")
+        if not all(t.description in self.descriptions for t in self.trajectories):
+            raise ValueError("Class missing in descriptions.")
 
     @property
     def _used_concepts(self):
@@ -46,7 +56,7 @@ class Task:
             "low_level_actions": list(low_level_actions),
         }
 
-    def write(self, output_dir) -> str:
+    def write(self, output_dir, max_videos=5, min_frames=32) -> str:
         tasks_dir = output_dir / "tasks" / "alfred" / self.prefix
         tasks_dir.mkdir(parents=True, exist_ok=True)
         videos_dir = output_dir / "videos" / "alfred" / self.prefix / self.name
@@ -68,16 +78,22 @@ class Task:
             )
 
         videos = []
+        video_counter = Counter()
         # Task videos
         # TODO Could be made more efficient by only having one copy of each video
         for trajectory in self.trajectories:
+            if video_counter[trajectory.description] >= max_videos:
+                continue
+            video_counter[trajectory.description] += 1
             video_name = f"{trajectory.trial_id}_{uuid.uuid4()}.mp4"
             label = description_to_label[trajectory.description]
             (videos_dir / label).mkdir(parents=True, exist_ok=True)
-            trajectory.video.write_videofile(
-                str(videos_dir / label / video_name), logger=None
-            )
+            video = trajectory.video(min_frames=min_frames)
+            video.write_videofile(str(videos_dir / label / video_name), logger=None)
             videos.append({"path": f"{dir}/{self.name}/{video_name}", "label": label})
+
+        if len(set(video_counter.values())) != 1:
+            print(f"WARNING: Unbalanced video classes: {video_counter}")
 
         # Task data
         with open(tasks_dir / f"{self.name}_data.json", "w") as f:
@@ -142,6 +158,112 @@ class Task:
         )
 
 
+def object_recognition_tasks(trajectories: list[Trajectory]) -> list[Task]:
+    objects = set(plausible_action_objects["PickupObject"][0])
+    trajectories_by_container = {}
+    for t in trajectories:
+        for a in t.actions:
+            if a.action == "PickupObject":
+                trajectory = t.with_modified_actions([a])
+                trajectories_by_container.setdefault(a.object2, []).append(trajectory)
+
+    sorted_by_container = sorted(
+        trajectories_by_container.items(), key=lambda t: len(t[1]), reverse=True
+    )
+    seen = set()
+    tasks = []
+    for container, cont_trajectories in sorted_by_container:
+        if seen == objects:
+            break
+        cont_trajectories = [
+            t for t in cont_trajectories if t.actions[0].object1 not in seen
+        ]
+        if not cont_trajectories:
+            continue
+        if not container:
+            container = "somewhere"
+        try:
+            tasks.append(
+                Task(
+                    "level_1/object_recognition/pick",
+                    f"{container.replace(' ', '_')}",
+                    cont_trajectories,
+                )
+            )
+            seen |= set(t.actions[0].object1 for t in cont_trajectories)
+        except ValueError as e:
+            print(f"Skipping container {container} due to problems: {e}")
+
+    if seen != objects:
+        print(f"Missing objects: {objects - seen}")
+
+    return tasks
+
+
+def location_recognition_tasks(trajectories: list[Trajectory]) -> list[Task]:
+    short_trajectories = []
+    for t in trajectories:
+        full_hands = False
+        for a in t.actions:
+            full_hands = a.action == "PickupObject" or (
+                full_hands and a.action != "PutObject"
+            )
+            if not full_hands and a.action == "GotoLocation":
+                short_trajectories.append(t.with_modified_actions([a]))
+
+    tasks = [
+        Task(
+            "level_1/object_recognition/goto",
+            "location",
+            short_trajectories,
+        )
+    ]
+
+    return tasks
+
+
+def container_recognition_tasks(trajectories: list[Trajectory]) -> list[Task]:
+    containers = set(plausible_action_objects["PutObject"][1])
+    trajectories_by_object = {}
+    for t in trajectories:
+        for a in t.actions:
+            if a.action == "PutObject":
+                trajectory = t.with_modified_actions([a])
+                trajectories_by_object.setdefault(a.object1, []).append(trajectory)
+
+    sorted_by_object = sorted(
+        trajectories_by_object.items(), key=lambda t: len(t[1]), reverse=True
+    )
+    seen = set()
+    tasks = []
+    for object, obj_trajectories in sorted_by_object:
+        if seen == containers:
+            break
+        obj_trajectories = [
+            t for t in obj_trajectories if t.actions[0].object2 not in seen
+        ]
+        if not obj_trajectories:
+            continue
+        if not object:
+            object = "somewhere"
+        try:
+            tasks.append(
+                Task(
+                    "level_1/object_recognition/put",
+                    f"{object.replace(' ', '_')}",
+                    obj_trajectories,
+                )
+            )
+            seen |= set(t.actions[0].object2 for t in obj_trajectories)
+        except ValueError as e:
+            print(f"Skipping object {object} due to problems: {e}")
+
+    if seen != containers:
+        print(f"Missing containers: {containers - seen}")
+
+    return tasks
+
+
 PROMPT_GPT = """
 You will be given five frames from a first-person video taken in a 3D model of a small house. The frames are given to you in chronological order.
 
@@ -169,7 +291,7 @@ def write_config(tasks, output_dir):
             "tasks": tasks,
             "models": [
                 {"kind": "encoder", "encoder": "s3d", "heads": [{"kind": "cosine"}]},
-                {"kind": "gpt", "n_frames": 5},
+                # {"kind": "gpt", "n_frames": 5},
                 {"kind": "encoder", "encoder": "viclip", "heads": [{"kind": "cosine"}]},
                 # {
                 #     "kind": "encoder",

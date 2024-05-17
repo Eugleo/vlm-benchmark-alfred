@@ -77,7 +77,8 @@ class HighLevelAction:
     @property
     def description(self):
         if self.action == "PickupObject":
-            return f"we pick up a {self.object1}"
+            place = f" from the {self.object2}" if self.object2 else ""
+            return f"we pick up a {self.object1}" + place
         elif self.action == "ToggleObject":
             return f"we turn the {self.object1} on"
         elif self.action == "SliceObject":
@@ -111,13 +112,13 @@ class HighLevelAction:
             raise ValueError(f"Unknown object id: {object1}")
         object1 = object.id_to_str[object1]
 
-        if action in ["PutObject", "HeatObject", "CoolObject"]:
-            object2 = js["planner_action"]["coordinateReceptacleObjectId"][0]
-            if object2 not in object.id_to_str:
-                raise ValueError(f"Unknown object id: {object2}")
-            object2 = object.id_to_str[object2]
-        else:
-            object2 = None
+        object2 = None
+        if action in ["PutObject", "PickupObject", "HeatObject", "CoolObject"]:
+            if "coordinateReceptacleObjectId" in js["planner_action"]:
+                object2 = js["planner_action"]["coordinateReceptacleObjectId"][0]
+                if object2 not in object.id_to_str:
+                    raise ValueError(f"Unknown object id: {object2}")
+                object2 = object.id_to_str[object2]
 
         return HighLevelAction(
             human_descriptions=descriptions,
@@ -152,6 +153,8 @@ class Trajectory:
     def description(self, high_level=True) -> str:
         if high_level:
             actions = self.actions
+            if len(actions) == 1:
+                return actions[0].description.capitalize()
             last_action = actions[-1].description
             return (
                 "First, "
@@ -163,14 +166,20 @@ class Trajectory:
             raise NotImplementedError
 
     @property
-    def video(self) -> ImageSequenceClip:
+    def n_frames(self) -> int:
+        return sum(
+            len(lla.images) for hla in self.actions for lla in hla.low_level_actions
+        )
+
+    def video(self, min_frames: int = 32) -> ImageSequenceClip:
         clip_cache, frames = {}, []
+        k = (min_frames // self.n_frames) + 1
         for hla in self.actions:
             path = hla._images_path or self._images_path
             clip = clip_cache.setdefault(path, VideoFileClip(str(path)))
             frame_indices = [img for lla in hla.low_level_actions for img in lla.images]
             fps = clip.fps
-            frames += [clip.get_frame(i / fps) for i in frame_indices]
+            frames += [f for i in frame_indices for f in [clip.get_frame(i / fps)] * k]
         return ImageSequenceClip(frames, fps=fps)
 
     def substitute(self, index: int, action: HighLevelAction) -> "Trajectory":
