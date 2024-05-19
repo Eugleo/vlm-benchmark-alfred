@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -38,11 +39,13 @@ class LowLevelAction:
             "ToggleObjectOff",
         ]:
             object1 = js["api_action"]["objectId"].split("|")[0]
+            object1 = object.id_to_str[object1]
         else:
             object1 = None
 
         if action in ["PutObject"]:
             object2 = js["api_action"]["receptacleObjectId"].split("|")[0]
+            object2 = object.id_to_str[object2]
         else:
             object2 = None
 
@@ -54,12 +57,15 @@ class LowLevelAction:
 @dataclass
 class HighLevelAction:
     human_descriptions: list[str]
-    low_level_actions: list[LowLevelAction]
+    actions: list[LowLevelAction]
 
     action: str
     object1: str
     object2: Optional[str] = None
 
+    # Only used when editing tasks by hand
+    # If None, we generate a description from the action and objects
+    _description: Optional[str] = None
     # Only used for substitutions
     # If None, we inherit the image path from the video we're in
     _images_path: Optional[Path] = None
@@ -76,6 +82,8 @@ class HighLevelAction:
 
     @property
     def description(self):
+        if self._description:
+            return self._description
         if self.action == "PickupObject":
             place = f" from the {self.object2}" if self.object2 else ""
             return f"we pick up a {self.object1}" + place
@@ -83,8 +91,6 @@ class HighLevelAction:
             return f"we turn the {self.object1} on"
         elif self.action == "SliceObject":
             return f"we slice the {self.object1}"
-        elif self.action == "CleanObject":
-            return f"we clean the {self.object1}"
         elif self.action == "GotoLocation":
             return f"we walk to the {self.object1}"
         else:
@@ -96,6 +102,8 @@ class HighLevelAction:
                 return f"we cool the {self.object1} {preposition} the {self.object2}"
             elif self.action == "HeatObject":
                 return f"we heat the {self.object1} {preposition} the {self.object2}"
+            elif self.action == "CleanObject":
+                return f"we clean the {self.object1} {preposition} the {self.object2}"
             else:
                 raise ValueError(f"Unknown action: {self.action}")
 
@@ -113,7 +121,13 @@ class HighLevelAction:
         object1 = object.id_to_str[object1]
 
         object2 = None
-        if action in ["PutObject", "PickupObject", "HeatObject", "CoolObject"]:
+        if action in [
+            "PutObject",
+            "PickupObject",
+            "HeatObject",
+            "CoolObject",
+            "CleanObject",
+        ]:
             if "coordinateReceptacleObjectId" in js["planner_action"]:
                 object2 = js["planner_action"]["coordinateReceptacleObjectId"][0]
                 if object2 not in object.id_to_str:
@@ -122,7 +136,7 @@ class HighLevelAction:
 
         return HighLevelAction(
             human_descriptions=descriptions,
-            low_level_actions=low_level_actions,
+            actions=low_level_actions,
             action=action,
             object1=object1,
             object2=object2,
@@ -139,6 +153,9 @@ class Trajectory:
 
     _human_overall_annotations: list[str]
     _images_path: Path
+    # Only used when editing trajectories by hand
+    # If None, we generate a description from the high level actions
+    _description: Optional[str] = None
 
     def __len__(self):
         return len(self.actions)
@@ -151,6 +168,8 @@ class Trajectory:
 
     @property
     def description(self, high_level=True) -> str:
+        if self._description is not None:
+            return self._description
         if high_level:
             actions = self.actions
             if len(actions) == 1:
@@ -167,9 +186,7 @@ class Trajectory:
 
     @property
     def n_frames(self) -> int:
-        return sum(
-            len(lla.images) for hla in self.actions for lla in hla.low_level_actions
-        )
+        return sum(len(lla.images) for hla in self.actions for lla in hla.actions)
 
     def video(self, min_frames: int = 32) -> ImageSequenceClip:
         clip_cache, frames = {}, []
@@ -177,7 +194,7 @@ class Trajectory:
         for hla in self.actions:
             path = hla._images_path or self._images_path
             clip = clip_cache.setdefault(path, VideoFileClip(str(path)))
-            frame_indices = [img for lla in hla.low_level_actions for img in lla.images]
+            frame_indices = [img for lla in hla.actions for img in lla.images]
             fps = clip.fps
             frames += [f for i in frame_indices for f in [clip.get_frame(i / fps)] * k]
         return ImageSequenceClip(frames, fps=fps)
@@ -192,9 +209,7 @@ class Trajectory:
     def filter_low_level(self, predicate) -> "Trajectory":
         new_actions = []
         for action in self.actions:
-            new_low_level_actions = [
-                lla for lla in action.low_level_actions if predicate(lla)
-            ]
+            new_low_level_actions = [lla for lla in action.actions if predicate(lla)]
             new_actions.append(
                 HighLevelAction(
                     action.human_descriptions,
@@ -210,6 +225,17 @@ class Trajectory:
         return Trajectory(
             self.trial_id, self.dataset, self.type, actions, [], self._images_path
         )
+
+    def reverse(self, description: str):
+        hlas = []
+        for hla in self.actions[::-1]:
+            llas = deepcopy(hla.actions[::-1])
+            for lla in llas:
+                lla.images = lla.images[::-1]
+            hlas.append(HighLevelAction([], llas, hla.action, hla.object1, hla.object2))
+        new_self = self.with_modified_actions(hlas)
+        new_self._description = description
+        return new_self
 
     @staticmethod
     def from_file(path: Path):

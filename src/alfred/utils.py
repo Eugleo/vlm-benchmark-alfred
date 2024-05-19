@@ -1,13 +1,17 @@
 from pathlib import Path
+from typing import Callable, Hashable, TypeVar
 
 from alfred.trajectory import Trajectory
 
+T = TypeVar("T")
 
-def group_by(objects, fun):
-    result = {}
+
+def group_by(objects: list[T], fun: Callable[[T], Hashable]) -> list[list[T]]:
+    groups = {}
     for obj in objects:
-        result.setdefault(fun(obj), []).append(obj)
-    return list(result.values())
+        groups.setdefault(fun(obj), []).append(obj)
+    result = list(groups.values())
+    return sorted(result, key=lambda l: len(l), reverse=True)
 
 
 def get_action_tuples(trajectory: Trajectory):

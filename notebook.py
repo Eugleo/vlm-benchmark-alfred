@@ -6,10 +6,11 @@
 from collections import Counter
 from copy import deepcopy
 from pathlib import Path
+import random
 
 import polars as pl
 from alfred import object, utils
-from alfred.task import Task, object_recognition_tasks, container_recognition_tasks, location_recognition_tasks, write_config
+from alfred.task import Task, object_tasks, container_tasks, write_config,clean_tasks,heat_tasks, cool_tasks, toggle_tasks, pick_up_tasks, slice_tasks
 from alfred.trajectory import Trajectory, shorten_trajectories
 from plotnine import *
 from polars import col as c
@@ -47,6 +48,7 @@ g = g[:2]
 t = Task.create_substituted(g, action_library, 3)
 t.write(Path("test"))
 
+
 # %%
 types = set(t.type for t in trajectories)
 actions = {}
@@ -75,14 +77,37 @@ easy_tasks = [t for t in trajectories if t.type != "pick_and_place_with_movable_
 
 tasks = []
 
-for t in object_recognition_tasks(easy_tasks):
+for t in object_tasks(easy_tasks):
     tasks.append(t.write(benchmark_path))
 
-for t in container_recognition_tasks(easy_tasks):
+for t in container_tasks(easy_tasks):
     tasks.append(t.write(benchmark_path))
 
-for t in location_recognition_tasks(trajectories):
+for t in clean_tasks(trajectories):
     tasks.append(t.write(benchmark_path))
+
+for t in heat_tasks(trajectories):
+    tasks.append(t.write(benchmark_path))
+
+for t in cool_tasks(trajectories):
+    tasks.append(t.write(benchmark_path))
+
+for t in toggle_tasks(trajectories):
+    tasks.append(t.write(benchmark_path))
+
+for t in pick_up_tasks(trajectories):
+    tasks.append(t.write(benchmark_path))
+
+for t in slice_tasks(trajectories):
+    tasks.append(t.write(benchmark_path))
+
+write_config(tasks, benchmark_path)
+
 
 # %%
-write_config(tasks, benchmark_path)
+tasks = clean_tasks(trajectories)
+pprint(tasks[0].descriptions)
+tasks[0].write(Path("test"))
+# %%
+
+# %%
