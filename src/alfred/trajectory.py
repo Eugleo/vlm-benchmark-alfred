@@ -109,7 +109,10 @@ class HighLevelAction:
 
     @staticmethod
     def from_json(
-        js: dict, descriptions: list[str], low_level_actions: list[LowLevelAction]
+        js: dict,
+        descriptions: list[str],
+        low_level_actions: list[LowLevelAction],
+        sliced_objects: list[str],
     ) -> "HighLevelAction":
         action = js["planner_action"]["action"]
         if action in ["HeatObject", "CoolObject", "GotoLocation"]:
@@ -119,6 +122,8 @@ class HighLevelAction:
         if object1 not in object.id_to_str:
             raise ValueError(f"Unknown object id: {object1}")
         object1 = object.id_to_str[object1]
+        if object1 in sliced_objects:
+            object1 = "slice of " + object1
 
         object2 = None
         if action in [
@@ -212,11 +217,11 @@ class Trajectory:
             new_low_level_actions = [lla for lla in action.actions if predicate(lla)]
             new_actions.append(
                 HighLevelAction(
-                    action.human_descriptions,
-                    new_low_level_actions,
-                    action.action,
-                    action.object1,
-                    action.object2,
+                    human_descriptions=action.human_descriptions,
+                    actions=new_low_level_actions,
+                    action=action.action,
+                    object1=action.object1,
+                    object2=action.object2,
                 )
             )
         return self.with_modified_actions(new_actions)
@@ -232,7 +237,15 @@ class Trajectory:
             llas = deepcopy(hla.actions[::-1])
             for lla in llas:
                 lla.images = lla.images[::-1]
-            hlas.append(HighLevelAction([], llas, hla.action, hla.object1, hla.object2))
+            hlas.append(
+                HighLevelAction(
+                    human_descriptions=[],
+                    actions=llas,
+                    action=hla.action,
+                    object1=hla.object1,
+                    object2=hla.object2,
+                )
+            )
         new_self = self.with_modified_actions(hlas)
         new_self._description = description
         return new_self
@@ -257,17 +270,19 @@ class Trajectory:
                 LowLevelAction.from_json(action, low_to_images[i])
                 for i, action in enumerate(js["plan"]["low_actions"])
             ]
-            high_level_actions = [
-                HighLevelAction.from_json(
+
+            high_level_actions, sliced_objects = [], []
+            for action, description in zip(js["plan"]["high_pddl"], descriptions):
+                lla_indices = sorted(list(high_to_low[action["high_idx"]]))
+                hla = HighLevelAction.from_json(
                     action,
                     description,
-                    [
-                        low_level_actions[i]
-                        for i in sorted(list(high_to_low[action["high_idx"]]))
-                    ],
+                    [low_level_actions[i] for i in lla_indices],
+                    sliced_objects.copy(),
                 )
-                for action, description in zip(js["plan"]["high_pddl"], descriptions)
-            ]
+                high_level_actions.append(hla)
+                if hla.action == "SliceObject":
+                    sliced_objects.append(hla.object1)
 
             # Here we assume that:
             # - the video dir is videos

@@ -4,7 +4,6 @@ import random
 import uuid
 from collections import Counter
 from copy import deepcopy
-from typing import Optional
 
 import yaml
 
@@ -15,11 +14,13 @@ from alfred.trajectory import HighLevelAction, Trajectory
 PROMPT_GPT = """
 You will be given five frames from a first-person video taken in a 3D model of a small house. The frames are given to you in chronological order.
 
-Your task is to describe what you see in each frame. Focus on our location, the objects we're handling, and what actions are (likely) being performed. The ways in which you can interact with objects include cleaning them, heating them up, cooling them down, picking them up, and putting them somewhere.
+# FIRST TASK
 
-IMPORTANT: Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it.
+Your first task is to describe what you see in each frame. Focus on our location, the objects we're handling, and what actions are (likely) being performed. The ways in which you can interact with objects include cleaning them, heating them up, cooling them down, picking them up, and putting them somewhere.
 
-# EXAMPLE
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it.
+
+## EXAMPLE
 Input: [five frames]
 
 Assistant:
@@ -27,9 +28,9 @@ Assistant:
 2. Now it seems we walked near a windowsill. We don't appear to have anything in hand. There is a butter knife on the windowsill.
 3. We seem to be holding the butter knife now, beacuse it is at the bottom of the screen, almost as if it was lying on the floor. We are near a microwave.
 4. We now see the microwave is turned on. We are probaly heating up the butter knife, since we do not have it in our hand anymore.
-5. We have pulled out the butter knife from the microwave. We are now near the windowsill again.
-
-# TASK"""[1:]
+5. We have pulled out the butter knife from the microwave. We are now near the windowsill again."""[
+    1:
+]
 
 
 class Task:
@@ -222,8 +223,7 @@ def get_clipped_trajectories(
 ) -> list[tuple[int, Trajectory]]:
     result = []
     for t in trajectories:
-        try:
-            idx = [a.action for a in t.actions].index(action)
+        for idx in [i for i, a in enumerate(t.actions) if a.action == action]:
             hl_actions = deepcopy(t.actions)
             hl_actions[idx - 1].actions = hl_actions[idx - 1].actions[-context:]
             if len(hl_actions) > idx + 1:
@@ -242,8 +242,6 @@ def get_clipped_trajectories(
             new_t = t.with_modified_actions(hl_actions[beg:end])
             new_t._description = hl_actions[idx].description.capitalize()
             result.append((idx - beg, new_t))
-        except ValueError:
-            continue
     return result
 
 
@@ -257,12 +255,12 @@ def group_trajectories(
             (
                 g[0][1].actions[g[0][0]].object1
                 if object1
-                else [t.actions[g[0][0]].object1 for _, t in g]
+                else [t.actions[idx].object1 for idx, t in g]
             ),
             (
                 g[0][1].actions[g[0][0]].object2
                 if object2
-                else [t.actions[g[0][0]].object2 for _, t in g]
+                else [t.actions[idx].object2 for idx, t in g]
             ),
             [t for _, t in g],
         )
@@ -280,11 +278,13 @@ def prompt_object(container):
     return f"""
 You will be given five frames from a first-person video taken in a 3D model of a small house. The frames are given to you in chronological order.
 
-Your task is to describe what you see in each frame. Specifically, the video will show us or putting down an aobject into/on a {container}. Your goal is to discern the the object we are handling.
+# FIRST TASK
 
-IMPORTANT: Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera.
+Your first task is to describe what you see in each frame. Specifically, the video will show us or putting down an object into/on a {container}. Your goal is to discern the the object we are handling.
 
-# EXAMPLE
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera.
+
+## EXAMPLE
 Input: [five frames]
 
 Assistant:
@@ -292,9 +292,9 @@ Assistant:
 2. We see a multitude of objects on the {container}, among them a toaster, a butter knife, a laptop, and a mug.
 3. We are now holding the laptop, since it is at the bottom of the screen.
 4. We are still holding the laptop. We are now walking away from the {container}.
-5. We are now a bit further away from the {container}. We are still holding the laptop.
-
-# TASK"""[1:]
+5. We are now a bit further away from the {container}. We are still holding the laptop."""[
+        1:
+    ]
 
 
 def object_tasks(trajectories: list[Trajectory]) -> list[Task]:
@@ -304,7 +304,9 @@ def object_tasks(trajectories: list[Trajectory]) -> list[Task]:
     seen = set()
     tasks = []
     for objects, container, g in group_trajectories(object_trajectories, object2=True):
-        assert isinstance(container, str) and isinstance(objects, list)
+        assert (container is None or isinstance(container, str)) and isinstance(
+            objects, list
+        )
         if seen == objects:
             break
         container_trajectories = [
@@ -336,11 +338,13 @@ def prompt_container(object):
     return f"""
 You will be given five frames from a first-person video taken in a 3D model of a small house. The frames are given to you in chronological order.
 
-Your task is to describe what you see in each frame. Specifically, the video will show us or putting a {object} somewhere. Your goal is to discern the container we are putting it in/on.
+# FIRST TASK
 
-IMPORTANT: Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera.
+Your first task is to describe what you see in each frame. Specifically, the video will show us or putting a {object} somewhere. Your goal is to discern the container we are putting it in/on.
 
-# EXAMPLE
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera.
+
+## EXAMPLE
 Input: [five frames]
 
 Assistant:
@@ -349,9 +353,9 @@ Assistant:
 2. We see a multitude of objects on the countertop, among them a toaster, a butter knife, a laptop, and a mug.
 3. We are now holding the laptop, since it is at the bottom of the screen.
 4. We are still holding the laptop. We are now walking away from the countertop.
-5. We are now a bit further away from the countertop. We are still holding the laptop.
-
-# TASK"""[1:]
+5. We are now a bit further away from the countertop. We are still holding the laptop."""[
+        1:
+    ]
 
 
 def container_tasks(trajectories: list[Trajectory]) -> list[Task]:
@@ -395,11 +399,13 @@ def prompt_cleaning(object):
     return f"""
 You will be given five frames from a first-person video taken in a 3D model of a small house. The frames are given to you in chronological order.
 
-Your task is to describe what you see in each frame. Specifically, the video will show us carrying a {object} to a sink and then possibly cleaning it under running water. Your goal is to discern whether the cleaning actually happened — i.e. whether the water was running — or whether we just moved the {object} around.
+# FIRST TASK
 
-IMPORTANT: Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it. Similarly, cleaning an object is depicted by the object being in a sink, submerged in water.
+Your first task is to describe what you see in each frame. Specifically, the video will show us carrying a {object} to a sink and then possibly cleaning it under running water. Your goal is to discern whether the cleaning actually happened — i.e. whether the water was running — or whether we just moved the {object} around.
 
-# EXAMPLE FOR A SIMILAR TASK (heating)
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it. Similarly, cleaning an object is depicted by the object being in a sink, submerged in water.
+
+## EXAMPLE FOR A SIMILAR TASK (heating)
 Input: [five frames]
 
 Assistant:
@@ -407,9 +413,7 @@ Assistant:
 2. We are now near a sink. The keychain is still at the bottom of the screen, so we are definitely holding it.
 3. The keychain now lies in the sink. The water is not running, so we are not cleaning it.
 4. The keychain is still in the sink. The water is not running, so we are not cleaning it.
-5. We are holding the keychain again. We did not clean it.
-
-# TASK"""[1:]
+5. We are holding the keychain again. We did not clean it."""[1:]
 
 
 def clean_tasks(trajectories: list[Trajectory]) -> list[Task]:
@@ -440,11 +444,13 @@ def prompt_heating(object):
     return f"""
 You will be given five frames from a first-person video taken in a 3D model of a small house. The frames are given to you in chronological order.
 
-Your task is to describe what you see in each frame. Specifically, the video will show us carrying a {object} to a microwave and then possibly heating it up there. Your goal is to discern whether the microwave has actually been turned on, or whether we just moved the {object} around without heating it up.
+# FIRST TASK
 
-IMPORTANT: Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it.
+Your first task is to describe what you see in each frame. Specifically, the video will show us carrying a {object} to a microwave and then possibly heating it up there. Your goal is to discern whether the microwave has actually been turned on, or whether we just moved the {object} around without heating it up.
 
-# EXAMPLE (heating)
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it.
+
+## EXAMPLE (heating)
 Input: [five frames]
 
 Assistant:
@@ -452,9 +458,7 @@ Assistant:
 2. We are now near a microwave. The keychain is still at the bottom of the screen, so we are definitely holding it.
 3. The keychain now lies in the microwave. The microwave is not running, so we are not heating the keychain up.
 4. The keychain is still in the microwave. The microwave is still not running.
-5. We are holding the keychain again. We did not heat it up.
-
-# TASK"""[1:]
+5. We are holding the keychain again. We did not heat it up."""[1:]
 
 
 def heat_tasks(trajectories: list[Trajectory]) -> list[Task]:
@@ -484,11 +488,13 @@ def prompt_cooling(object):
     return f"""
 You will be given five frames from a first-person video taken in a 3D model of a small house. The frames are given to you in chronological order.
 
-Your task is to describe what you see in each frame. Specifically, the video will show us carrying a {object} to a fridge and then possibly cooling it down there for a while. Your goal is to discern whether the {object} has actually been in the fridge for a while, or whether we just moved it around without heating it up.
+# FIRST TASK
 
-IMPORTANT: Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it.
+Your first task is to describe what you see in each frame. Specifically, the video will show us carrying a {object} to a fridge and then possibly cooling it down there for a while. Your goal is to discern whether the {object} has actually been in the fridge for a while, or whether we just moved it around without heating it up.
 
-# EXAMPLE (heating)
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it.
+
+## EXAMPLE (heating)
 Input: [five frames]
 
 Assistant:
@@ -496,9 +502,9 @@ Assistant:
 2. We are now near a fridge. The keychain is still at the bottom of the screen, so we are definitely holding it.
 3. The fridge is now open. We still hold the keychain.
 4. The fridge is now closed. We still hold the keychain.
-5. We are holding the keychain, still. It seems we just opened and closed the fridge without putting the keychain in, even for a moment.
-
-# TASK"""[1:]
+5. We are holding the keychain, still. It seems we just opened and closed the fridge without putting the keychain in, even for a moment."""[
+        1:
+    ]
 
 
 def cool_tasks(trajectories: list[Trajectory]) -> list[Task]:
@@ -538,11 +544,13 @@ def prompt_toggle(object):
     return f"""
 You will be given five frames from a first-person video taken in a 3D model of a small house. The frames are given to you in chronological order.
 
-Your task is to describe what you see in each frame. Specifically, the video will depict us standing in front of a {object} and your goal is to see whether we turned it on or off.
+# FIRST TASK
 
-IMPORTANT: Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it. Simialrly, whether an object has changed state is depicted only by a (sudden) change in the object's appearance.
+Your first task is to describe what you see in each frame. Specifically, the video will depict us standing in front of a {object} and your goal is to see whether we turned it on or off.
 
-# EXAMPLE (blender)
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it. Simialrly, whether an object has changed state is depicted only by a (sudden) change in the object's appearance.
+
+## EXAMPLE (blender)
 Input: [five frames]
 
 Assistant:
@@ -550,9 +558,7 @@ Assistant:
 2. The blender doesn't seem to be turned on; there is a red light on the front that signals it is off.
 3. Nothing has changed; the blender is still off.
 4. Now, the blender is turned on. We can see the blades are in motion and the red light has turned green.
-5. The light is still green, the blender is still on.
-
-# TASK"""[1:]
+5. The light is still green, the blender is still on."""[1:]
 
 
 def toggle_tasks(trajectories: list[Trajectory]) -> list[Task]:
@@ -566,17 +572,25 @@ def toggle_tasks(trajectories: list[Trajectory]) -> list[Task]:
             for j, lla in enumerate(hla.actions)
             if lla.action == "ToggleObjectOn"
         ]
-        if not toggling_indices:
-            continue
-        hla_idx, lla_idx = toggling_indices[0]
-        toggle_action = deepcopy(t.actions[hla_idx])
-        toggle_action.actions = toggle_action.actions[lla_idx : lla_idx + 1]
-        object = toggle_action.actions[0].object1
-        toggle_action._description = f"we turn the {object} on"
-        toggling_trajectories.append((0, t.with_modified_actions([toggle_action])))
+        for hla_idx, lla_idx in toggling_indices:
+            hl_actions = deepcopy(t.actions)
+            hl_actions[hla_idx - 1].actions = hl_actions[hla_idx - 1].actions[-3:]
+            beg = (
+                hla_idx - 1
+                if hla_idx > 0 and hl_actions[hla_idx - 1].action == "GotoLocation"
+                else hla_idx
+            )
+            end = hla_idx + 1
+            toggle_action = hl_actions[hla_idx]
+            toggle_action.actions = [toggle_action.actions[lla_idx]]
+            new_t = t.with_modified_actions(hl_actions[beg:end])
+            new_t._description = f"We turn the {toggle_action.actions[0].object1} on"
+            toggling_trajectories.append((hla_idx - beg, new_t))
 
-    for object, _, g in group_trajectories(toggling_trajectories, object1=True):
-        assert isinstance(object, str)
+    for g in utils.group_by(
+        toggling_trajectories, lambda t: t[1].actions[t[0]].actions[0].object1
+    ):
+        object, g = g[0][1].actions[g[0][0]].actions[0].object1, [t for _, t in g]
 
         task_trajectories = g.copy() + [
             t.reverse(f"We turn the {object} off") for t in g
@@ -599,11 +613,13 @@ def prompt_pick(object):
     return f"""
 You will be given five frames from a first-person video taken in a 3D model of a small house. The frames are given to you in chronological order.
 
-Your task is to describe what you see in each frame. Specifically, the video will depict us either picking up a {object}, or putting it down somewhere. Your goal is to discern whether we picked up the {object} or put it down.
+# FIRST TASK
 
-IMPORTANT: Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera. Similarly, putting an object down is depicted by the object being placed on a surface, there is no intermediate movement.
+Your first task is to describe what you see in each frame. Specifically, the video will depict us either picking up a {object}, or putting it down somewhere. Your goal is to discern whether we picked up the {object} or put it down.
 
-# EXAMPLE (blender)
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera. Similarly, putting an object down is depicted by the object being placed on a surface, there is no intermediate movement.
+
+## EXAMPLE (blender)
 Input: [five frames]
 
 Assistant:
@@ -611,9 +627,7 @@ Assistant:
 2. Now it seems we walked near a windowsill. We don't appear to have anything in hand. There is a butter knife on the windowsill.
 3. We seem to be holding the butter knife now, beacuse it is at the bottom of the screen, almost as if it was lying on the floor.
 4. We still hold the butter knife. We are further from the windowsill now, possibly walking towards somewhere else.
-5. We still hold the knife.
-
-# TASK"""[1:]
+5. We still hold the knife."""[1:]
 
 
 def pick_up_tasks(trajectories: list[Trajectory]) -> list[Task]:
@@ -641,11 +655,13 @@ def slicing_prompt(object):
     return f"""
 You will be given five frames from a first-person video taken in a 3D model of a small house. The frames are given to you in chronological order.
 
-Your task is to describe what you see in each frame. Specifically, the video will show us carrying a knife and walking towards a {object}. Your goal is to discern whether we sliced the {object} at the end of the video or not. Focus very closely on the object and compare its state among the frames.
+# FIRST TASK
 
-IMPORTANT: Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it. No movement will be shown either, the slicing is an instantaneous event that only slighty changes the object's appearance.
+Your first task is to describe what you see in each frame. Specifically, the video will show us carrying a knife and walking towards a {object}. Your goal is to discern whether we sliced the {object} at the end of the video or not. Focus very closely on the object and compare its state among the frames.
 
-# EXAMPLE (grating)
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it. No movement will be shown either, the slicing is an instantaneous event that only slighty changes the object's appearance.
+
+## EXAMPLE (grating)
 Input: [five frames]
 
 Assistant:
@@ -653,9 +669,9 @@ Assistant:
 2. We have walked near a windowsill. The grater is still at the bottom of the screen, so we are definitely holding it.
 3. On the windowsill, we see a cucumber. We are holding the grater, but it is not clear if we are using it.
 4. The cucumber now has lines on it, which suggests we have grated it.
-5. We are still near the windowsill. The cucumber still has the grated appearance.
-
-# TASK"""[1:]
+5. We are still near the windowsill. The cucumber still has the grated appearance."""[
+        1:
+    ]
 
 
 def slice_tasks(trajectories: list[Trajectory]) -> list[Task]:
@@ -680,4 +696,136 @@ def slice_tasks(trajectories: list[Trajectory]) -> list[Task]:
                 prompt_gpt=slicing_prompt(object),
             )
         )
+    return tasks
+
+
+def sliced_v_whole_prompt(object):
+    return f"""
+You will be given five frames from a first-person video taken in a 3D model of a small house. The frames are given to you in chronological order.
+
+# FIRST TASK
+
+Your first task is to describe what you see in each frame. Specifically, the video will show us picking up a {object}. Your goal is to discern whether it is a whole {object} that we pick up or just a slice of it.
+
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it.
+
+## EXAMPLE (grating)
+Input: [five frames]
+
+Assistant:
+1. We are nearing a countertop. We see a potato lying on the countertop.
+2. We are now standing directly at the countertop. It is hard too see whether the potato is sliced or not when it just lies there.
+3. We picked up the potato. It seems to be a wedge instead of the whole thing.
+4. It is definitely just a wedge. We are turning away from the countertop now.
+5. We are now nearing a fridge, still holding the potato, as signified by it being at the bottom of the screen."""[
+        1:
+    ]
+
+
+def sliced_v_whole_tasks(trajectories: list[Trajectory]) -> list[Task]:
+    picking_trajectories = get_clipped_trajectories(trajectories, "PickupObject")
+    groups = utils.group_by(
+        picking_trajectories,
+        lambda t: (
+            t[1].actions[t[0]].object1.removeprefix("slice of "),
+            t[1].actions[t[0]].object2,
+        ),
+    )
+    tasks = []
+    for g in groups:
+        object = g[0][1].actions[g[0][0]].object1
+        if "slice" in object:
+            print(g)
+        if len(set(t.actions[idx].object1 for idx, t in g)) == 1:
+            # Skip, we are only interested with actions where the object is both sliced and non-sliced
+            continue
+        tasks.append(
+            Task(
+                "foundation/sliced_v_whole",
+                f"{object.replace(' ', '_')}",
+                [t for _, t in g],
+                prompt_gpt=sliced_v_whole_prompt(object),
+            )
+        )
+    return tasks
+
+
+def prompt_on_v_off(object):
+    return f"""
+You will be given five frames from a first-person video taken in a 3D model of a small house. The frames are given to you in chronological order.
+
+# FIRST TASK
+
+Your first task is to describe what you see in each frame. Specifically, the video will depict us standing in front of or walking towards a {object} and your goal is to see whether the {object} is turned on or off. It won't change state during the video.
+
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it.
+
+## EXAMPLE (blender)
+Input: [five frames]
+
+Assistant:
+1. We are near the countertop. We see a blender in front of us.
+2. The blender doesn't seem to be turned on; there is a red light on the front that signals it is off.
+3. Nothing has changed; the blender is still off.
+4. The red light is still on.
+5. For the entire length of the video, the blender has been off"""[1:]
+
+
+def on_v_off_tasks(trajectories: list[Trajectory]) -> list[Task]:
+    tasks = []
+
+    toggling_trajectories = []
+    for t in trajectories:
+        toggling_indices = [
+            (i, j)
+            for i, hla in enumerate(t.actions)
+            for j, lla in enumerate(hla.actions)
+            if lla.action == "ToggleObjectOn"
+        ]
+        for hla_idx, lla_idx in toggling_indices:
+            hl_actions = deepcopy(t.actions)
+            hl_actions[hla_idx - 1].actions = hl_actions[hla_idx - 1].actions[-5:]
+            if len(hl_actions) > hla_idx + 1:
+                hl_actions[hla_idx + 1].actions = hl_actions[hla_idx + 1].actions[:5]
+            beg = (
+                hla_idx - 1
+                if hla_idx > 0 and hl_actions[hla_idx - 1].action == "GotoLocation"
+                else hla_idx
+            )
+            end = (
+                hla_idx + 2
+                if hla_idx + 1 < len(hl_actions)
+                and hl_actions[hla_idx + 1].action == "GotoLocation"
+                else hla_idx + 1
+            )
+            toggle_action = hl_actions[hla_idx]
+            toggle_action.actions = [toggle_action.actions[lla_idx]]
+            new_t = t.with_modified_actions(hl_actions[beg:end])
+            toggling_trajectories.append((hla_idx - beg, new_t))
+
+    for g in utils.group_by(
+        toggling_trajectories, lambda t: t[1].actions[t[0]].actions[0].object1
+    ):
+        object = g[0][1].actions[g[0][0]].actions[0].object1
+
+        task_trajectories = []
+        for idx, t in g:
+            t_on, t_off = deepcopy(t), deepcopy(t)
+            t_on.actions = [t_on.actions[idx]]
+            t_on.actions[0].actions[0].images = t.actions[idx].actions[0].images[-3:]
+            t_on._description = f"The {object} is turned on"
+            t_off.actions[idx].actions[0].images = t.actions[idx].actions[0].images[:3]
+            t_off._description = f"The {object} is turned off"
+            task_trajectories += [t_on, t_off]
+
+        name = f"{object.replace(' ', '_')}"
+        tasks.append(
+            Task(
+                "foundation/on_v_off",
+                name,
+                task_trajectories,
+                prompt_gpt=prompt_on_v_off(object),
+            )
+        )
+
     return tasks
