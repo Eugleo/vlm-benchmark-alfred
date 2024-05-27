@@ -24,7 +24,8 @@ class LowLevelAction:
         return (
             self.action == other.action
             and self.object1 == other.object1
-            and self.object2 == other.object2
+            # If the 2nd object is None, it matches everything
+            and (not self.object2 or not other.object2 or self.object2 == other.object2)
         )
 
     @staticmethod
@@ -61,6 +62,13 @@ class HighLevelAction:
 
     action: str
     object1: str
+    beg_hand_content: Optional[str]
+    end_hand_content: Optional[str]
+    scene: str
+
+    beg_location: Optional[str]
+    end_location: Optional[str]
+
     object2: Optional[str] = None
 
     # Only used when editing tasks by hand
@@ -99,11 +107,11 @@ class HighLevelAction:
             if self.action == "PutObject":
                 return f"we put the {self.object1} {preposition} the {self.object2}"
             elif self.action == "CoolObject":
-                return f"we cool the {self.object1} {preposition} the {self.object2}"
+                return f"we cool the {self.object1} by putting it {preposition} the {self.object2} for a while"
             elif self.action == "HeatObject":
                 return f"we heat the {self.object1} {preposition} the {self.object2}"
             elif self.action == "CleanObject":
-                return f"we clean the {self.object1} {preposition} the {self.object2}"
+                return f"we clean the {self.object1} {preposition} the {self.object2} under running water"
             else:
                 raise ValueError(f"Unknown action: {self.action}")
 
@@ -113,6 +121,9 @@ class HighLevelAction:
         descriptions: list[str],
         low_level_actions: list[LowLevelAction],
         sliced_objects: list[str],
+        scene: str,
+        previous_hand_content: Optional[str],
+        previous_location: Optional[str],
     ) -> "HighLevelAction":
         action = js["planner_action"]["action"]
         if action in ["HeatObject", "CoolObject", "GotoLocation"]:
@@ -122,7 +133,8 @@ class HighLevelAction:
         if object1 not in object.id_to_str:
             raise ValueError(f"Unknown object id: {object1}")
         object1 = object.id_to_str[object1]
-        if object1 in sliced_objects:
+        # This has some false positives, but it's the best we can do
+        if object1 in sliced_objects and action != "SliceObject":
             object1 = "slice of " + object1
 
         object2 = None
@@ -139,12 +151,44 @@ class HighLevelAction:
                     raise ValueError(f"Unknown object id: {object2}")
                 object2 = object.id_to_str[object2]
 
+        beg_hand_content = previous_hand_content
+        if action == "PickupObject":
+            end_hand_content = object1
+        elif action == "PutObject":
+            end_hand_content = None
+        else:
+            end_hand_content = previous_hand_content
+
+        if action == "GotoLocation":
+            beg_location = previous_location
+            end_location = object1
+        elif action in ["PickupObject", "PutObject"]:
+            beg_location = object2
+            end_location = beg_location
+        elif action in ["CoolObject"]:
+            beg_location = "fridge"
+            end_location = "fridge"
+        elif action in ["HeatObject"]:
+            beg_location = "microwave"
+            end_location = "microwave"
+        elif action in ["CleanObject"]:
+            beg_location = "sink basin"
+            end_location = "sink basin"
+        else:
+            beg_location = previous_location
+            end_location = previous_location
+
         return HighLevelAction(
             human_descriptions=descriptions,
             actions=low_level_actions,
             action=action,
             object1=object1,
             object2=object2,
+            beg_hand_content=beg_hand_content,
+            end_hand_content=end_hand_content,
+            beg_location=beg_location,
+            end_location=end_location,
+            scene=scene,
         )
 
 
@@ -172,11 +216,22 @@ class Trajectory:
             return self.actions[idx]
 
     @property
-    def description(self, high_level=True) -> str:
+    def description(self, high_level=True, block_level=True) -> str:
         if self._description is not None:
             return self._description
-        if high_level:
+        if high_level and not block_level:
             actions = self.actions
+            if len(actions) == 1:
+                return actions[0].description.capitalize()
+            last_action = actions[-1].description
+            return (
+                "First, "
+                + ", then ".join(a.description for a in actions[:-1])
+                + (", and finally " if len(actions) > 2 else ", and then ")
+                + last_action
+            )
+        elif block_level:
+            actions = [a for a in self.actions if a.action != "GotoLocation"]
             if len(actions) == 1:
                 return actions[0].description.capitalize()
             last_action = actions[-1].description
@@ -222,6 +277,11 @@ class Trajectory:
                     action=action.action,
                     object1=action.object1,
                     object2=action.object2,
+                    beg_hand_content=action.beg_hand_content,
+                    end_hand_content=action.end_hand_content,
+                    beg_location=action.beg_location,
+                    end_location=action.end_location,
+                    scene=action.scene,
                 )
             )
         return self.with_modified_actions(new_actions)
@@ -244,6 +304,11 @@ class Trajectory:
                     action=hla.action,
                     object1=hla.object1,
                     object2=hla.object2,
+                    beg_hand_content=hla.end_hand_content,
+                    end_hand_content=hla.beg_hand_content,
+                    beg_location=hla.end_location,
+                    end_location=hla.beg_location,
+                    scene=hla.scene,
                 )
             )
         new_self = self.with_modified_actions(hlas)
@@ -266,24 +331,6 @@ class Trajectory:
                 for i in range(action_count)
             ]
 
-            low_level_actions = [
-                LowLevelAction.from_json(action, low_to_images[i])
-                for i, action in enumerate(js["plan"]["low_actions"])
-            ]
-
-            high_level_actions, sliced_objects = [], []
-            for action, description in zip(js["plan"]["high_pddl"], descriptions):
-                lla_indices = sorted(list(high_to_low[action["high_idx"]]))
-                hla = HighLevelAction.from_json(
-                    action,
-                    description,
-                    [low_level_actions[i] for i in lla_indices],
-                    sliced_objects.copy(),
-                )
-                high_level_actions.append(hla)
-                if hla.action == "SliceObject":
-                    sliced_objects.append(hla.object1)
-
             # Here we assume that:
             # - the video dir is videos
             # - other than that, the video is stored in a path that mirrors `path`
@@ -291,6 +338,43 @@ class Trajectory:
             parts = list(path.parts)
             parts[0] = "videos"
             images_path = list(Path(*parts[:-1]).glob("**/video.mp4"))[0]
+
+            low_level_actions = [
+                LowLevelAction.from_json(action, low_to_images[i])
+                for i, action in enumerate(js["plan"]["low_actions"])
+            ]
+
+            high_level_actions, sliced_objects, hand_content, location = (
+                [],
+                [],
+                None,
+                None,
+            )
+            for action, description in zip(js["plan"]["high_pddl"], descriptions):
+                lla_indices = sorted(list(high_to_low[action["high_idx"]]))
+                hla = HighLevelAction.from_json(
+                    action,
+                    description,
+                    [low_level_actions[i] for i in lla_indices],
+                    sliced_objects.copy(),
+                    previous_hand_content=hand_content,
+                    previous_location=location,
+                    scene=js["scene"]["floor_plan"],
+                )
+                hla._images_path = images_path
+                hand_content = hla.end_hand_content
+                location = hla.end_location
+                high_level_actions.append(hla)
+                if hla.action == "SliceObject":
+                    sliced_objects.append(hla.object1)
+
+            for prev, next in zip(high_level_actions[:-1], high_level_actions[1:]):
+                if prev.end_location in object.locations:
+                    next.beg_location = prev.end_location
+                elif next.beg_location:
+                    prev.end_location = next.beg_location
+                elif prev.end_location:
+                    next.beg_location = prev.end_location
 
             return Trajectory(
                 trial_id=js["task_id"],
@@ -304,9 +388,27 @@ class Trajectory:
             )
 
 
+def to_action_blocks(actions: list[HighLevelAction]) -> list[list[HighLevelAction]]:
+    grouped_actions, group = [], []
+    for a in actions:
+        if group and group[-1].action != "GotoLocation":
+            grouped_actions.append(group)
+            group = []
+        group.append(a)
+    if group:
+        grouped_actions.append(group)
+    return grouped_actions
+
+
 def shorten_trajectories(trajectories: list[Trajectory], to: int) -> list["Trajectory"]:
-    return [
-        t
-        for trajectory in trajectories
-        for t in [trajectory[beg : beg + to] for beg in range(len(trajectory) - to + 1)]
-    ]
+    result = []
+    for trajectory in trajectories:
+        blocks = to_action_blocks(trajectory.actions)
+        if len(blocks) < to:
+            continue
+        for beg in range(len(blocks) - to + 1):
+            end = beg + to
+            new_actions = [a for block in blocks[beg:end] for a in block]
+            new_trajectory = trajectory.with_modified_actions(new_actions)
+            result.append(new_trajectory)
+    return result

@@ -461,6 +461,34 @@ plausible_action_objects = {
     "ToggleObject": (["floor lamp", "desk lamp"], [None]),
 }
 
+locations = [
+    "ottoman",
+    "stove burner",
+    "toilet paper hanger",
+    "sofa",
+    "hand towel holder",
+    "microwave",
+    "fridge",
+    "toilet",
+    "safe",
+    "arm chair",
+    "cabinet",
+    "dining table",
+    "shelf",
+    "desk",
+    "coffee machine",
+    "bathtub basin",
+    "garbage can",
+    "drawer",
+    "dresser",
+    "sink basin",
+    "floor lamp",
+    "side table",
+    "counter top",
+    "coffee table",
+    "bed",
+]
+
 actions = [
     "SliceObject",
     "PickupObject",

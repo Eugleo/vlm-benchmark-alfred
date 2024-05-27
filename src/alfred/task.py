@@ -2,8 +2,9 @@ import itertools
 import json
 import random
 import uuid
-from collections import Counter
+from collections import Counter, deque
 from copy import deepcopy
+from typing import Optional
 
 import yaml
 
@@ -16,9 +17,9 @@ You will be given five frames from a first-person video taken in a 3D model of a
 
 # FIRST TASK
 
-Your first task is to describe what you see in each frame. Focus on our location, the objects we're handling, and what actions are (likely) being performed. The ways in which you can interact with objects include cleaning them, heating them up, cooling them down, picking them up, and putting them somewhere.
+Your first task is to describe what you see in each frame. Focus on our location, the objects we're handling, and what actions are (likely) being performed. The ways in which you can interact with objects include cleaning them, heating them up, cooling them down, picking them up, and putting them somewhere. We can also start out with objects already in hand — take a look at the first frame.
 
-Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it.
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, almost as if it was lying on the floor. Similarly, actions such as cleaning an object are depicted by the object being in a sink, submerged in water, not by any dynamic movement.
 
 ## EXAMPLE
 Input: [five frames]
@@ -39,22 +40,25 @@ class Task:
     prompt_gpt: str
     trajectories: list[Trajectory]
     descriptions: list[str]
+    metadata: Optional[dict] = None
 
     def __init__(
         self,
         prefix,
         name,
         trajectories,
+        metadata: Optional[dict] = None,
         prompt_gpt: str = PROMPT_GPT,
-        descriptions=None,
     ):
         self.prefix = prefix
         self.name = name
         self.trajectories = trajectories
         self.prompt_gpt = prompt_gpt
-        if descriptions is None:
-            descriptions = list(set(t.description for t in trajectories))
-        self.descriptions = descriptions
+        self.descriptions = []
+        for t in trajectories:
+            if t.description not in self.descriptions:
+                self.descriptions.append(t.description)
+        self.metadata = metadata
         self._check_classes()
 
     def _check_classes(self):
@@ -86,7 +90,7 @@ class Task:
             "low_level_actions": list(low_level_actions),
         }
 
-    def write(self, output_dir, max_videos=5, min_frames=32) -> str:
+    def write(self, output_dir, max_videos=10, min_frames=32) -> str:
         tasks_dir = output_dir / "tasks" / "alfred" / self.prefix
         tasks_dir.mkdir(parents=True, exist_ok=True)
         videos_dir = output_dir / "videos" / "alfred" / self.prefix / self.name
@@ -102,7 +106,8 @@ class Task:
                 {
                     "label_prompts": label_to_description,
                     "prompt_gpt": self.prompt_gpt,
-                    "concepts": self._used_concepts,
+                    "metadata": (self.metadata or {})
+                    | {"concepts": self._used_concepts},
                 },
                 f,
             )
@@ -111,6 +116,7 @@ class Task:
         video_counter = Counter()
         # Task videos
         # TODO Could be made more efficient by only having one copy of each video
+        random.shuffle(self.trajectories)
         for trajectory in self.trajectories:
             if video_counter[trajectory.description] >= max_videos:
                 continue
@@ -199,16 +205,16 @@ def write_config(tasks, output_dir):
         config = {
             "tasks": tasks,
             "models": [
+                {"kind": "gpt", "model": "gpt-4o", "async_batch": True, "n_frames": 5},
                 {"kind": "encoder", "encoder": "s3d", "heads": [{"kind": "cosine"}]},
-                # {"kind": "gpt", "n_frames": 5},
                 {"kind": "encoder", "encoder": "viclip", "heads": [{"kind": "cosine"}]},
-                # {
-                #     "kind": "encoder",
-                #     "encoder": "clip",
-                #     "heads": [{"kind": "cosine"}],
-                #     "hf_model": "ViT-bigG-14/laion2b_s39b_b160k",
-                #     "n_frames": 8,
-                # },
+                {
+                    "kind": "encoder",
+                    "encoder": "clip",
+                    "heads": [{"kind": "cosine"}],
+                    "hf_model": "ViT-bigG-14/laion2b_s39b_b160k",
+                    "n_frames": 4,
+                },
             ],
             "task_dir": "tasks/alfred",
             "video_dir": "videos/alfred",
@@ -403,7 +409,7 @@ You will be given five frames from a first-person video taken in a 3D model of a
 
 Your first task is to describe what you see in each frame. Specifically, the video will show us carrying a {object} to a sink and then possibly cleaning it under running water. Your goal is to discern whether the cleaning actually happened — i.e. whether the water was running — or whether we just moved the {object} around.
 
-Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it. Similarly, cleaning an object is depicted by the object being in a sink, submerged in water.
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, almost as if it was lying on the floor. Similarly, cleaning an object is depicted by the object being in a sink, submerged in water.
 
 ## EXAMPLE FOR A SIMILAR TASK (heating)
 Input: [five frames]
@@ -423,6 +429,18 @@ def clean_tasks(trajectories: list[Trajectory]) -> list[Task]:
     for object, container, g in groups:
         assert isinstance(object, str) and isinstance(container, str)
         task_trajectories = g.copy()
+
+        # Go to, Go away
+        for t in g:
+            idx = [a.action for a in t.actions].index("CleanObject")
+            alt_actions = deepcopy(t.actions)
+            alt_t = t.with_modified_actions(alt_actions[:idx] + alt_actions[idx + 1 :])
+            alt_t._description = (
+                f"We get to the {container}, holding {object}, but we don't put it in"
+            )
+            task_trajectories.append(alt_t)
+
+        # Go to, Put, Pick, Go away
         for t in g:
             alt_t = t.filter_low_level(lambda lla: "ToggleObject" not in lla.action)
             alt_t._description = f"We put the {object} in the {container} and pick it back up without running water over it"
@@ -448,7 +466,7 @@ You will be given five frames from a first-person video taken in a 3D model of a
 
 Your first task is to describe what you see in each frame. Specifically, the video will show us carrying a {object} to a microwave and then possibly heating it up there. Your goal is to discern whether the microwave has actually been turned on, or whether we just moved the {object} around without heating it up.
 
-Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it.
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, almost as if it was lying on the floor.
 
 ## EXAMPLE (heating)
 Input: [five frames]
@@ -468,10 +486,58 @@ def heat_tasks(trajectories: list[Trajectory]) -> list[Task]:
     for object, container, g in groups:
         assert isinstance(object, str) and isinstance(container, str)
         task_trajectories = g.copy()
+
+        sequence = [
+            "OpenObject",
+            "PutObject",
+            "CloseObject",
+            "ToggleObjectOn",
+            "ToggleObjectOff",
+            "OpenObject",
+            "PickupObject",
+            "CloseObject",
+        ]
+
+        # Go to, Go away
+        for t in g:
+            alt_actions = deepcopy(t.actions)
+            idx = [a.action for a in t.actions].index("HeatObject")
+            alt_t = t.with_modified_actions(alt_actions[:idx] + alt_actions[idx + 1 :])
+            alt_t._description = f"We go to the {container} and then immediately leave without doing anything"
+            task_trajectories.append(alt_t)
+
+        # Go to, Open, Close, Go away
+        for t in g:
+            alt_actions = deepcopy(t.actions)
+            idx = [a.action for a in t.actions].index("HeatObject")
+            hla = alt_actions[idx]
+            llas = hla.actions
+            if [lla.action for lla in llas] != sequence:
+                continue
+            hla.actions = llas[:1] + llas[7:]
+            alt_t = t.with_modified_actions(alt_actions)
+            alt_t._description = f"We open the {container} and immediately close it again, without putting the {object} in even for just a while"
+            task_trajectories.append(alt_t)
+
+        # Go to, Open, Put, Pick up, Close, Go away
+        for t in g:
+            alt_actions = deepcopy(t.actions)
+            idx = [a.action for a in t.actions].index("HeatObject")
+            hla = alt_actions[idx]
+            llas = hla.actions
+            if [lla.action for lla in llas] != sequence:
+                continue
+            hla.actions = llas[:2] + llas[6:]
+            alt_t = t.with_modified_actions(alt_actions)
+            alt_t._description = f"We open the {container}, put in the {object} and immediately pick it back up without heating it"
+            task_trajectories.append(alt_t)
+
+        # Go to, Open, Put, Close, Open, Pick up, Close, Go away
         for t in g:
             alt_t = t.filter_low_level(lambda lla: "ToggleObject" not in lla.action)
-            alt_t._description = f"We put the {object} in the {container} and pick it back up without heating it"
+            alt_t._description = f"We put the {object} in the {container} for a while, and even close it, but we do not turn the {container} on, and so the {object} is not heated up"
             task_trajectories.append(alt_t)
+
         name = f"{object.replace(' ', '_')}"
         tasks.append(
             Task(
@@ -492,7 +558,7 @@ You will be given five frames from a first-person video taken in a 3D model of a
 
 Your first task is to describe what you see in each frame. Specifically, the video will show us carrying a {object} to a fridge and then possibly cooling it down there for a while. Your goal is to discern whether the {object} has actually been in the fridge for a while, or whether we just moved it around without heating it up.
 
-Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it.
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, almost as if it was lying on the floor.
 
 ## EXAMPLE (heating)
 Input: [five frames]
@@ -514,20 +580,52 @@ def cool_tasks(trajectories: list[Trajectory]) -> list[Task]:
     for object, container, g in groups:
         assert isinstance(object, str) and isinstance(container, str)
         task_trajectories = g.copy()
+
+        sequence = [
+            "OpenObject",
+            "PutObject",
+            "CloseObject",
+            "OpenObject",
+            "PickupObject",
+            "CloseObject",
+        ]
+
+        # Go to, Open, Put, Immediately pick up, Close, Go away
         for t in g:
             alt_actions = deepcopy(t.actions)
             idx = [a.action for a in t.actions].index("CoolObject")
             hla = alt_actions[idx]
             llas = hla.actions
-            put_idx = [lla.action for lla in llas].index("PutObject")
-            # Drop the whole sequence where we put the object into the fridge
-            # Then close the fridge etc
-            hla.actions = llas[:put_idx] + llas[put_idx + 4 :]
+            if [lla.action for lla in llas] != sequence:
+                continue
+            hla.actions = llas[:2] + llas[4:]
+            alt_t = t.with_modified_actions(alt_actions)
+            alt_t._description = f"We open the {container}, put in the {object} and immediately pick it back up without cooling it"
+            task_trajectories.append(alt_t)
+
+        # Go to, Open, Close, Go away
+        for t in g:
+            alt_actions = deepcopy(t.actions)
+            idx = [a.action for a in t.actions].index("CoolObject")
+            hla = alt_actions[idx]
+            llas = hla.actions
+            if [lla.action for lla in llas] != sequence:
+                continue
+            hla.actions = llas[:1] + llas[5:]
+            alt_t = t.with_modified_actions(alt_actions)
+            alt_t._description = f"We open the {container} and then immediately close it without putting anything in"
+            task_trajectories.append(alt_t)
+
+        # Go to, Go away
+        for t in g:
+            idx = [a.action for a in t.actions].index("CoolObject")
+            alt_actions = t.actions[:idx] + t.actions[idx + 1 :]
             alt_t = t.with_modified_actions(alt_actions)
             alt_t._description = (
-                f"We open the {container} and then close it without putting anything in"
+                f"We go to the {container} and don't even open it before leaving again"
             )
             task_trajectories.append(alt_t)
+
         name = f"{object.replace(' ', '_')}"
         tasks.append(
             Task(
@@ -548,7 +646,7 @@ You will be given five frames from a first-person video taken in a 3D model of a
 
 Your first task is to describe what you see in each frame. Specifically, the video will depict us standing in front of a {object} and your goal is to see whether we turned it on or off.
 
-Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it. Simialrly, whether an object has changed state is depicted only by a (sudden) change in the object's appearance.
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, almost as if it was lying on the floor. Simialrly, whether an object has changed state is depicted only by a (sudden) change in the object's appearance.
 
 ## EXAMPLE (blender)
 Input: [five frames]
@@ -633,17 +731,23 @@ Assistant:
 def pick_up_tasks(trajectories: list[Trajectory]) -> list[Task]:
     tasks = []
     picking_trajectories = get_clipped_trajectories(trajectories, "PickupObject")
-    for object, _, g in group_trajectories(picking_trajectories, object1=True):
-        assert isinstance(object, str)
-        task_trajectories = g.copy() + [
-            t.reverse(f"We put the {object} down") for t in g
-        ]
-        name = f"{object.replace(' ', '_')}"
+    putting_trajectories = get_clipped_trajectories(trajectories, "PutObject")
+    groups = group_trajectories(
+        picking_trajectories + putting_trajectories, object1=True, object2=True
+    )
+    for object, container, g in groups:
+        if container is None or not set(
+            a.action for t in g for a in t.actions
+        ).issuperset({"PickupObject", "PutObject"}):
+            continue
+        assert isinstance(object, str) and isinstance(container, str)
+
+        name = f"{object.replace(' ', '_')}_{container.replace(' ', '_')}"
         tasks.append(
             Task(
                 "foundation/pick_v_put",
                 name,
-                task_trajectories,
+                g,
                 prompt_gpt=prompt_pick(object),
             )
         )
@@ -659,7 +763,7 @@ You will be given five frames from a first-person video taken in a 3D model of a
 
 Your first task is to describe what you see in each frame. Specifically, the video will show us carrying a knife and walking towards a {object}. Your goal is to discern whether we sliced the {object} at the end of the video or not. Focus very closely on the object and compare its state among the frames.
 
-Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it. No movement will be shown either, the slicing is an instantaneous event that only slighty changes the object's appearance.
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, almost as if it was lying on the floor. No movement will be shown either, the slicing is an instantaneous event that only slighty changes the object's appearance.
 
 ## EXAMPLE (grating)
 Input: [five frames]
@@ -682,7 +786,9 @@ def slice_tasks(trajectories: list[Trajectory]) -> list[Task]:
         task_trajectories = g.copy()
         for t in g:
             idx = [a.action for a in t.actions].index("SliceObject")
-            alt_t = deepcopy(t[: idx + 1])
+            if idx == 0:
+                continue
+            alt_t = t[:idx]
             alt_t._description = (
                 f"We walk to the {object} with a knife in hand but don't slice it"
             )
@@ -707,7 +813,7 @@ You will be given five frames from a first-person video taken in a 3D model of a
 
 Your first task is to describe what you see in each frame. Specifically, the video will show us picking up a {object}. Your goal is to discern whether it is a whole {object} that we pick up or just a slice of it.
 
-Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it.
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, almost as if it was lying on the floor.
 
 ## EXAMPLE (grating)
 Input: [five frames]
@@ -726,24 +832,24 @@ def sliced_v_whole_tasks(trajectories: list[Trajectory]) -> list[Task]:
     picking_trajectories = get_clipped_trajectories(trajectories, "PickupObject")
     groups = utils.group_by(
         picking_trajectories,
-        lambda t: (
-            t[1].actions[t[0]].object1.removeprefix("slice of "),
-            t[1].actions[t[0]].object2,
-        ),
+        lambda t: (t[1].actions[t[0]].object1.removeprefix("slice of ")),
     )
     tasks = []
     for g in groups:
-        object = g[0][1].actions[g[0][0]].object1
-        if "slice" in object:
-            print(g)
         if len(set(t.actions[idx].object1 for idx, t in g)) == 1:
             # Skip, we are only interested with actions where the object is both sliced and non-sliced
             continue
+        object = g[0][1].actions[g[0][0]].object1
+        # container = g[0][1].actions[g[0][0]].object2 or "somewhere"
+        task_trajectories = []
+        for idx, t in g:
+            t._description = f"We pick up a {t.actions[idx].object1}"
+            task_trajectories.append(t)
         tasks.append(
             Task(
                 "foundation/sliced_v_whole",
-                f"{object.replace(' ', '_')}",
-                [t for _, t in g],
+                object.removeprefix("slice of ").replace(" ", "_"),
+                task_trajectories,
                 prompt_gpt=sliced_v_whole_prompt(object),
             )
         )
@@ -758,7 +864,7 @@ You will be given five frames from a first-person video taken in a 3D model of a
 
 Your first task is to describe what you see in each frame. Specifically, the video will depict us standing in front of or walking towards a {object} and your goal is to see whether the {object} is turned on or off. It won't change state during the video.
 
-Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, and moving with it.
+Remember that this is a model, so the objects don't look exactly as they would in real life. For example, no hands will be shown in the frames; instead, 'holding' an object is depicted by the object being at the bottom of the frame, close to the camera, almost as if it was lying on the floor.
 
 ## EXAMPLE (blender)
 Input: [five frames]
@@ -829,3 +935,269 @@ def on_v_off_tasks(trajectories: list[Trajectory]) -> list[Task]:
         )
 
     return tasks
+
+
+def actions_to_blocks(actions: list[HighLevelAction]) -> list[list[HighLevelAction]]:
+    grouped_actions, group = [], []
+    for a in actions:
+        if group and group[-1].action != "GotoLocation":
+            grouped_actions.append(group)
+            group = []
+        group.append(a)
+    if group:
+        grouped_actions.append(group)
+    return grouped_actions
+
+
+def from_action_blocks(blocks: list[list[HighLevelAction]]) -> list[HighLevelAction]:
+    return [a for block in blocks for a in block]
+
+
+def equivalent_trajectory_present(
+    trajectory: Trajectory, trajectories: list[Trajectory]
+):
+    actions = [a for a in trajectory.actions if a.action != "GotoLocation"]
+    for t in trajectories:
+        alt_actions = [a for a in t.actions if a.action != "GotoLocation"]
+        for a1, a2 in zip(actions, alt_actions):
+            if a1 != a2:
+                return False
+
+    return True
+
+
+def trajectories_with_block_prefix(
+    current_blocks: list[list[HighLevelAction]],
+    target_len: int,
+    not_equal_to: list[HighLevelAction],
+    scene: str,
+    all_blocks: dict[tuple[str, str | None], list[list[HighLevelAction]]],
+    all_goto: dict[
+        str, dict[tuple[str | None, str | None, str | None], list[HighLevelAction]]
+    ],
+):
+    if len(current_blocks) == target_len:
+        yield current_blocks
+        return
+
+    next_blocks = []
+
+    if current_blocks:
+        last_action = current_blocks[-1][-1]
+        location, hand_content = last_action.end_location, last_action.end_hand_content
+        for b in all_blocks.get((scene, hand_content), []):
+            a = b[0] if b[0].action != "GotoLocation" else b[1]
+            # The first added step in this trajectory has to be different
+            # from the other first added steps in the other trajectories
+            if a in not_equal_to:
+                continue
+
+            # If literally the same action is already in the trajectory, skip
+            if any(a is other_a for block in current_blocks for other_a in block):
+                continue
+
+            if b[0].beg_location == location:
+                next_blocks.append(b)
+            else:
+                gotos = all_goto.get(scene, {}).get(
+                    (location, a.beg_location, hand_content), []
+                )
+                for goto in gotos:
+                    next_blocks.append([goto] + b)
+    else:
+        for (s, _), l in all_blocks.items():
+            if s == scene:
+                for b in l:
+                    a = b[0] if b[0].action != "GotoLocation" else b[1]
+                    if not_equal_to and a == not_equal_to:
+                        continue
+                    next_blocks.append(b)
+
+    for b in next_blocks:
+        new_trajectory = current_blocks + [b]
+        yield from trajectories_with_block_prefix(
+            new_trajectory,
+            target_len,
+            # The next step can be anything now, just the first step had to be different
+            [],
+            scene,
+            all_blocks,
+            all_goto,
+        )
+
+
+def compute_blocks(
+    trajectories: list[Trajectory],
+) -> dict[tuple[str, str | None], list[list[HighLevelAction]]]:
+    all_blocks: dict[tuple[str, str | None], list[list[HighLevelAction]]] = {}
+    for trajectory in trajectories:
+        for g in actions_to_blocks(trajectory.actions):
+            scene, hand_content = g[0].scene, g[0].beg_hand_content
+            all_blocks.setdefault((scene, hand_content), []).append(g)
+    return all_blocks
+
+
+def compute_gotos(
+    trajectories: list[Trajectory],
+) -> dict[str, dict[tuple[str | None, str | None, str | None], list[HighLevelAction]]]:
+    goto_actions: dict[
+        str, dict[tuple[str | None, str | None, str | None], list[HighLevelAction]]
+    ] = {}
+    for trajectory in trajectories:
+        for a in [a for a in trajectory.actions if a.action == "GotoLocation"]:
+            scene_gotos = goto_actions.setdefault(a.scene, {})
+            matching_actions = scene_gotos.setdefault(
+                (a.beg_location, a.end_location, a.beg_hand_content), []
+            )
+            matching_actions.append(a)
+    return goto_actions
+
+
+def block_to_action(block: list[HighLevelAction]) -> HighLevelAction:
+    return block[0] if block[0].action != "GotoLocation" else block[1]
+
+
+def remixed_task(
+    seed: Trajectory,
+    videos_on_prefix_0: int,
+    videos_per_prefix: int,
+    trajectories: list[Trajectory],
+) -> Task:
+    all_blocks = compute_blocks(trajectories)
+    all_gotos = compute_gotos(trajectories)
+
+    seed_blocks = actions_to_blocks(seed.actions)
+    target_len = len(seed_blocks)
+    trajectories_by_prefix_len = {target_len: [seed]}
+    for prefix_len, seed_block in enumerate(seed_blocks):
+        if len(seed_block) == 1 and seed_block[0].action == "GotoLocation":
+            continue
+
+        candidates = trajectories_with_block_prefix(
+            seed_blocks[:prefix_len].copy(),
+            target_len,
+            # The upcoming action should be different from all the other first actions
+            # among the trajectories with the same prefix length (and seed trajectory)
+            [
+                block_to_action(actions_to_blocks(t.actions)[prefix_len])
+                for t in trajectories_by_prefix_len[prefix_len] + [seed]
+            ],
+            seed.actions[0].scene,
+            all_blocks,
+            all_gotos,
+        )
+
+        num_classes_limit = videos_on_prefix_0 if prefix_len == 0 else videos_per_prefix
+        num_classes = 0
+        num_iters = 0
+        for trajectory in candidates:
+            num_iters += 1
+            if num_classes == num_classes_limit:
+                break
+            new_t = seed.with_modified_actions(from_action_blocks(trajectory))
+            if not equivalent_trajectory_present(
+                new_t, [t for l in trajectories_by_prefix_len.values() for t in l]
+            ):
+                trajectories_by_prefix_len.setdefault(prefix_len, []).append(new_t)
+                num_classes += 1
+
+    return Task(
+        f"level_{target_len}/remix",
+        str(uuid.uuid4()),
+        [t for l in trajectories_by_prefix_len.values() for t in l],
+        metadata={
+            "prefix_lens": [
+                {"shared_prefix": prefix_len, "description": t.description}
+                for prefix_len, trajectories in trajectories_by_prefix_len.items()
+                for t in trajectories
+            ]
+        },
+        prompt_gpt=PROMPT_GPT,
+    )
+
+
+def try_make_consistent(
+    actions: list[HighLevelAction],
+    all_goto: dict[
+        str, dict[tuple[str | None, str | None, str | None], list[HighLevelAction]]
+    ],
+) -> list[HighLevelAction] | None:
+    result = [actions[0]]
+    for prev, next in zip(actions, actions[1:]):
+        if prev.end_hand_content != next.beg_hand_content:
+            return None
+
+        if prev.end_location != next.beg_location:
+            gotos = all_goto.get(prev.scene, {}).get(
+                (prev.end_location, next.beg_location, prev.end_hand_content), []
+            )
+            if not gotos:
+                return None
+            result += [gotos[0], next]
+        else:
+            result.append(next)
+    return result
+
+
+def slicing_consistent(actions: list[HighLevelAction]) -> bool:
+    for slicing_i in [i for i, a in enumerate(actions) if a.action == "SliceObject"]:
+        sliced_object = actions[slicing_i].object1
+        whole_before = all(
+            i <= slicing_i
+            for i, a in enumerate(actions)
+            if (sliced_object in a.description and "slice" not in a.description)
+        )
+        sliced_after = all(
+            i >= slicing_i
+            for i, a in enumerate(actions)
+            if ("slice" in a.description and sliced_object in a.description)
+        )
+        if not (whole_before and sliced_after):
+            return False
+    return True
+
+
+def permutation_task(
+    seed: Trajectory,
+    num_classes: int,
+    trajectories: list[Trajectory],
+) -> Task:
+    goto_actions = compute_gotos(trajectories)
+    important_actions = [a for a in seed.actions if a.action != "GotoLocation"]
+
+    consistent_trajectories, inconsistent_trajectories = [seed], []
+    for perm in itertools.permutations(important_actions):
+        if len(consistent_trajectories) == num_classes:
+            break
+
+        new_actions = try_make_consistent(list(perm), goto_actions)
+        if new_actions is None:
+            continue
+
+        new_trajectory = seed.with_modified_actions(new_actions)
+
+        if not equivalent_trajectory_present(
+            new_trajectory, consistent_trajectories + inconsistent_trajectories
+        ):
+            if slicing_consistent(list(perm)):
+                # if "we slice" not in perm[0].description:
+                #     for a in perm:
+                #         print(a.description)
+                #     print()
+                consistent_trajectories.append(new_trajectory)
+            else:
+                inconsistent_trajectories.append(new_trajectory)
+
+    task_trajectories = (consistent_trajectories + inconsistent_trajectories)[
+        :num_classes
+    ]
+
+    return Task(
+        f"level_{len(important_actions)}/permutation",
+        str(uuid.uuid4()),
+        task_trajectories,
+        prompt_gpt=PROMPT_GPT,
+        metadata={
+            "is_consistent_wrt_slicing": len(consistent_trajectories) == num_classes,
+        },
+    )

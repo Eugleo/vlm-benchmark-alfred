@@ -33,3 +33,16 @@ def load_trajectories(metadata_path: Path) -> list[Trajectory]:
             continue
         trajectories.append(trajectory)
     return trajectories
+
+
+def set_seed(seed: int) -> None:
+    import os
+    import random
+
+    import numpy as np
+
+    np.random.seed(seed)
+    random.seed(seed)
+    # Set a fixed value for the hash seed
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    print(f"Random seed set as {seed}")

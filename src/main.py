@@ -17,4 +17,4 @@ def generate(
     levels: Annotated[int, typer.Option()] = 6,
 ):
     metadata_path = Path(metadata)
-    trajectories = utils.load_normalized_trajectories(metadata_path)
+    trajectories = utils.load_trajectories(metadata_path)
