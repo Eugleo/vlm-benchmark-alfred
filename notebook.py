@@ -3,16 +3,12 @@
 # %autoreload 2
 
 # %%
+import math
 import random
-from collections import Counter
-from copy import deepcopy
 from pathlib import Path
 
-import polars as pl
-from alfred import object, utils
+from alfred import utils
 from alfred.task import (
-    Task,
-    actions_to_blocks,
     clean_tasks,
     container_tasks,
     cool_tasks,
@@ -27,10 +23,8 @@ from alfred.task import (
     toggle_tasks,
     write_config,
 )
-from alfred.trajectory import Trajectory, shorten_trajectories
+from alfred.trajectory import shorten_trajectories
 from plotnine import *
-from polars import col as c
-from rich.pretty import pprint
 
 utils.set_seed(42)
 
@@ -46,55 +40,9 @@ groups_per_level = {
     )
     for level in range(11)
 }
-# %%
-action_library = {}
-for action in object.actions:
-    for t in trajectories:
-        for a in t.actions:
-            if a.action == action:
-                a = deepcopy(a)
-                a._images_path = t._images_path
-                action_library.setdefault(action, set()).add(a)
-
 
 # %%
-types = set(t.type for t in trajectories)
-actions = {}
-for type in types:
-    for t in [t for t in trajectories if t.type == type]:
-        actions.setdefault(type, Counter()).update(
-            [tuple(a.action for a in t.actions if a.action != "GotoLocation")]
-        )
-pprint(actions)
-
-
-# %%
-def collapse_moves(actions):
-    result = []
-    last_was_move = False
-    for a in actions:
-        if a.startswith("Move") or a.startswith("Rotate") or a.startswith("Look"):
-            if last_was_move:
-                continue
-            last_was_move = True
-            a = "Move/Rotate/Look"
-        else:
-            last_was_move = False
-        result.append(a)
-    return result
-
-
-actions = {}
-for t in trajectories:
-    for a in t.actions:
-        actions.setdefault(a.action, Counter()).update(
-            [tuple(collapse_moves(lla.action for lla in a.actions))]
-        )
-pprint(actions)
-
-
-# %%
-benchmark_path = Path("/Users/eugen/Downloads/Projects/mats/vlm-benchmark")
+benchmark_path = Path("test")
 easy_tasks = [t for t in trajectories if t.type != "pick_and_place_with_movable_recep"]
 
 # %%
@@ -136,23 +84,11 @@ for t in limit(sliced_v_whole_tasks(trajectories)):
 for t in limit(on_v_off_tasks(trajectories)):
     tasks.append(t.write(benchmark_path))
 
-# for level in [3, 6]:
-#     random.shuffle(groups_per_level[level])
-#     for g in groups_per_level[level][:3]:
-#         perm = Task.create_permuted(g, 10)
-#         tasks.append(perm.write(Path(benchmark_path)))
-
-#         sub = Task.create_substituted(g, action_library, 10)
-#         tasks.append(sub.write(Path(benchmark_path)))
 
 # %%
-import math
-
-# tasks = []
-
-tasks_per_level = 33
+permutation_tasks_per_level = 50
 num_classes = 3
-for level in range(2, 9):
+for level in range(4, 9):
     level_num_classes = min(num_classes, math.factorial(level))
     groups = groups_per_level[level]
     random.shuffle(groups)
@@ -170,24 +106,27 @@ for level in range(2, 9):
                 consistent_candidates.append(task)
             else:
                 inconsistent_candidates.append(task)
-        if len(consistent_candidates) >= tasks_per_level:
+        if len(consistent_candidates) >= permutation_tasks_per_level:
             break
     else:
         print(
             f"Not enough consistent tasks for level {level}: {len(consistent_candidates)}"
         )
-        to_add = tasks_per_level - len(consistent_candidates)
+        to_add = permutation_tasks_per_level - len(consistent_candidates)
         print(f"Adding {to_add} inconsistent tasks")
         if to_add > len(inconsistent_candidates):
             print(
-                f"Only writing {len(consistent_candidates) + len(inconsistent_candidates)} out of {tasks_per_level} tasks"
+                f"Only writing {len(consistent_candidates) + len(inconsistent_candidates)} out of {permutation_tasks_per_level} tasks"
             )
 
-    for task in (consistent_candidates + inconsistent_candidates)[:tasks_per_level]:
+    for task in (consistent_candidates + inconsistent_candidates)[
+        :permutation_tasks_per_level
+    ]:
         name = task.write(benchmark_path)
         tasks.append(name)
         print(name)
 
+# %%
 videos_per_task = 8
 
 level_to_num_videos = {
@@ -205,7 +144,8 @@ assert all(
     for level, (a, b) in level_to_num_videos.items()
 )
 
-tasks_per_level = 12
+
+remix_tasks_per_level = 19
 
 for level in range(2, 9):
     groups = groups_per_level[level]
@@ -231,7 +171,7 @@ for level in range(2, 9):
 
         # +1 because we have 8 remixed classes on top of the 1 original class
         candidates.setdefault(len(task.trajectories), []).append(task)
-        if len(candidates.get(videos_per_task + 1, [])) >= tasks_per_level:
+        if len(candidates.get(videos_per_task + 1, [])) >= remix_tasks_per_level:
             break
     else:
         print(
@@ -247,7 +187,7 @@ for level in range(2, 9):
         [candidates.get(i, []) for i in list(range(videos_per_task + 1, 1, -1))], []
     )
 
-    for task in final_candidates[:tasks_per_level]:
+    for task in final_candidates[:remix_tasks_per_level]:
         name = task.write(benchmark_path)
         tasks.append(name)
         print(name)

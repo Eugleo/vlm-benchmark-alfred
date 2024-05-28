@@ -437,9 +437,7 @@ def clean_tasks(trajectories: list[Trajectory]) -> list[Task]:
             idx = [a.action for a in t.actions].index("CleanObject")
             alt_actions = deepcopy(t.actions)
             alt_t = t.with_modified_actions(alt_actions[:idx] + alt_actions[idx + 1 :])
-            alt_t._description = (
-                f"We get to the {container}, holding {object}, but we don't put it in"
-            )
+            alt_t._description = f"We go to the {container}, holding {object} in hand, we don't put it in the {container}"
             task_trajectories.append(alt_t)
 
         # Go to, Put, Pick, Go away
@@ -515,7 +513,7 @@ def heat_tasks(trajectories: list[Trajectory]) -> list[Task]:
             alt_actions = deepcopy(t.actions)
             idx = [a.action for a in t.actions].index("HeatObject")
             alt_t = t.with_modified_actions(alt_actions[:idx] + alt_actions[idx + 1 :])
-            alt_t._description = f"We go to the {container} and then immediately leave without doing anything"
+            alt_t._description = f"We go to the {container} and then immediately leave without putting the {object} in"
             task_trajectories.append(alt_t)
 
         # Go to, Open, Close, Go away
@@ -528,7 +526,7 @@ def heat_tasks(trajectories: list[Trajectory]) -> list[Task]:
                 continue
             hla.actions = llas[:1] + llas[7:]
             alt_t = t.with_modified_actions(alt_actions)
-            alt_t._description = f"We open the {container} and immediately close it again, without putting the {object} in even for just a while"
+            alt_t._description = f"We open the {container} and immediately close it again, without putting the {object} in"
             task_trajectories.append(alt_t)
 
         # Go to, Open, Put, Pick up, Close, Go away
@@ -541,13 +539,13 @@ def heat_tasks(trajectories: list[Trajectory]) -> list[Task]:
                 continue
             hla.actions = llas[:2] + llas[6:]
             alt_t = t.with_modified_actions(alt_actions)
-            alt_t._description = f"We open the {container}, put in the {object} and immediately pick it back up without heating it"
+            alt_t._description = f"We open the {container}, put the {object} in, then immediately pick it back up without heating it"
             task_trajectories.append(alt_t)
 
         # Go to, Open, Put, Close, Open, Pick up, Close, Go away
         for t in g:
             alt_t = t.filter_low_level(lambda lla: "ToggleObject" not in lla.action)
-            alt_t._description = f"We put the {object} in the {container} for a while, and even close it, but we do not turn the {container} on, and so the {object} is not heated up"
+            alt_t._description = f"We put the {object} in the {container} for a while, we do not turn the {container} on, then we pick up the {object} back again"
             task_trajectories.append(alt_t)
 
         name = f"{object.replace(' ', '_')}"
@@ -622,7 +620,7 @@ def cool_tasks(trajectories: list[Trajectory]) -> list[Task]:
                 continue
             hla.actions = llas[:2] + llas[4:]
             alt_t = t.with_modified_actions(alt_actions)
-            alt_t._description = f"We open the {container}, put in the {object} and immediately pick it back up without cooling it"
+            alt_t._description = f"We open the {container}, put in the {object} and immediately pick it back up without leaving it to cool in a closed {container}"
             task_trajectories.append(alt_t)
 
         # Go to, Open, Close, Go away
@@ -635,7 +633,7 @@ def cool_tasks(trajectories: list[Trajectory]) -> list[Task]:
                 continue
             hla.actions = llas[:1] + llas[5:]
             alt_t = t.with_modified_actions(alt_actions)
-            alt_t._description = f"We open the {container} and then immediately close it without putting anything in"
+            alt_t._description = f"We open the {container} and then immediately close it without putting the {object} in"
             task_trajectories.append(alt_t)
 
         # Go to, Go away
@@ -644,7 +642,7 @@ def cool_tasks(trajectories: list[Trajectory]) -> list[Task]:
             alt_actions = t.actions[:idx] + t.actions[idx + 1 :]
             alt_t = t.with_modified_actions(alt_actions)
             alt_t._description = (
-                f"We go to the {container} and don't even open it before leaving again"
+                f"We go to the {container} and then we leave, without even opening it"
             )
             task_trajectories.append(alt_t)
 
@@ -1026,11 +1024,9 @@ def equivalent_trajectory_present(
     actions = [a for a in trajectory.actions if a.action != "GotoLocation"]
     for t in trajectories:
         alt_actions = [a for a in t.actions if a.action != "GotoLocation"]
-        for a1, a2 in zip(actions, alt_actions):
-            if a1 != a2:
-                return False
-
-    return True
+        if all(a1 == a2 for a1, a2 in zip(actions, alt_actions)):
+            return True
+    return False
 
 
 def trajectories_with_block_prefix(
@@ -1076,20 +1072,20 @@ def trajectories_with_block_prefix(
             if s == scene:
                 for b in l:
                     a = b[0] if b[0].action != "GotoLocation" else b[1]
-                    if not_equal_to and a == not_equal_to:
+                    if a in not_equal_to:
                         continue
                     next_blocks.append(b)
 
     for b in next_blocks:
         new_trajectory = current_blocks + [b]
         yield from trajectories_with_block_prefix(
-            new_trajectory,
-            target_len,
+            current_blocks=new_trajectory,
+            target_len=target_len,
             # The next step can be anything now, just the first step had to be different
-            [],
-            scene,
-            all_blocks,
-            all_goto,
+            not_equal_to=[],
+            scene=scene,
+            all_blocks=all_blocks,
+            all_goto=all_goto,
         )
 
 
@@ -1147,7 +1143,7 @@ def remixed_task(
             # among the trajectories with the same prefix length (and seed trajectory)
             [
                 block_to_action(actions_to_blocks(t.actions)[prefix_len])
-                for t in trajectories_by_prefix_len[prefix_len] + [seed]
+                for t in trajectories_by_prefix_len.get(prefix_len, []) + [seed]
             ],
             seed.actions[0].scene,
             all_blocks,
