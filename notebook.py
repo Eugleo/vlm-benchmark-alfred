@@ -1,6 +1,6 @@
 # %%
-# %load_ext autoreload
-# %autoreload 2
+%load_ext autoreload
+%autoreload 2
 
 # %%
 import math
@@ -9,6 +9,7 @@ from pathlib import Path
 
 from alfred import utils
 from alfred.task import (
+    Task,
     clean_tasks,
     container_tasks,
     cool_tasks,
@@ -42,7 +43,7 @@ groups_per_level = {
 }
 
 # %%
-benchmark_path = Path("test")
+benchmark_path = Path("/Users/eugen/Downloads/Projects/mats/vlm-benchmark")
 easy_tasks = [t for t in trajectories if t.type != "pick_and_place_with_movable_recep"]
 
 # %%
@@ -84,9 +85,8 @@ for t in limit(sliced_v_whole_tasks(trajectories)):
 for t in limit(on_v_off_tasks(trajectories)):
     tasks.append(t.write(benchmark_path))
 
-
 # %%
-permutation_tasks_per_level = 50
+permutation_tasks_per_level = 33
 num_classes = 3
 for level in range(4, 9):
     level_num_classes = min(num_classes, math.factorial(level))
@@ -127,6 +127,7 @@ for level in range(4, 9):
         print(name)
 
 # %%
+tasks = []
 videos_per_task = 8
 
 level_to_num_videos = {
@@ -145,30 +146,36 @@ assert all(
 )
 
 
-remix_tasks_per_level = 19
+remix_tasks_per_level = 12
 
-for level in range(2, 9):
+for level in range(5, 9):
     groups = groups_per_level[level]
     random.shuffle(groups)
 
     candidates = {}
     for g in groups:
-        # Half of the tasks will not have slicing mixed in
-        # because we want to see other actions used, too
-        if len(candidates.get(videos_per_task + 1, [])) % 2 == 0:
-            all_trajectories = [
-                t
-                for t in trajectories
-                if not any(a.action == "SliceObject" for a in t.actions)
-            ]
-        else:
-            all_trajectories = trajectories
+        group_candidates: list[Task] = []
+        for seed in g:
+            # Half of the tasks will not have slicing mixed in
+            # because we want to see other actions used, too
+            # if len(candidates.get(videos_per_task + 1, [])) % 2 == 0:
+            #     all_trajectories = [
+            #         t
+            #         for t in trajectories
+            #         if not any(a.action == "SliceObject" for a in t.actions)
+            #     ]
+            # else:
+            #     all_trajectories = trajectories
 
-        videos_for_prefix_0, videos_per_prefix = level_to_num_videos[level]
-        task = remixed_task(
-            g[0], videos_for_prefix_0, videos_per_prefix, all_trajectories
-        )
+            videos_for_prefix_0, videos_per_prefix = level_to_num_videos[level]
+            task = remixed_task(
+                seed, videos_for_prefix_0, videos_per_prefix, trajectories
+            )
+            group_candidates.append(task)
+            if len(task.trajectories) == videos_per_task + 1:
+                break
 
+        task = next(t for t in sorted(group_candidates, key=lambda t: -len(t.trajectories)))
         # +1 because we have 8 remixed classes on top of the 1 original class
         candidates.setdefault(len(task.trajectories), []).append(task)
         if len(candidates.get(videos_per_task + 1, [])) >= remix_tasks_per_level:
@@ -188,9 +195,16 @@ for level in range(2, 9):
     )
 
     for task in final_candidates[:remix_tasks_per_level]:
-        name = task.write(benchmark_path)
+        name = task.write(Path("test"))
         tasks.append(name)
         print(name)
 
 # %%
-write_config(tasks, benchmark_path)
+write_config(tasks, Path("test"))
+
+# %%
+task = remixed_task(groups_per_level[4][0][0], 2, 2, trajectories)
+
+print([t.description for t in task.trajectories])
+
+# %%

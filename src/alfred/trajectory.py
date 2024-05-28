@@ -85,7 +85,8 @@ class HighLevelAction:
         return (
             self.action == other.action
             and self.object1 == other.object1
-            and self.object2 == other.object2
+            # If the 2nd object is None, it matches everything
+            and (not self.object2 or not other.object2 or self.object2 == other.object2)
         )
 
     @property

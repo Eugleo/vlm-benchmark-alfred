@@ -19,15 +19,23 @@ Your task is to describe what you see in each frame, separately, in a list. For 
 
 HIGH_LEVEL_TASK_EXAMPLE = """
 A few tips and hints to help you get started:
-- 'Holding an object' is depicted as the object being at the bottom of the screen, without any visible hands.
-- Similarly, no hands are shown for cleaning, heating, or any other action.
+- 'Holding an object' is depicted as the object being at the very bottom of the screen and VERY close to the camera, without any visible hands. Similarly, no hands are shown for cleaning, heating, or any other action.
+- If the object is at the very bottom and VERY close to the camera, it might just be lying somewhere, e.g. in a container that's positioned at the bottom of the screen.
+- If the first frame starts with us already holding an object, it was already in our hands from the beginning. No `pickup` action happens before the first frame.
 - The objects almost never lie on the floor. If the object is at the bottom of the screen and looks like it is lying on the floor, we are actually just holding it.
 - The possible actions that can be performed are: pickup(object, location), put(object, location), heat(object, microwave), cool(object, fridge), clean(object, sink), slice(object), toggle(object), and goto(location). You should formulate your descriptions of what happened since the last frame based on these actions.
-- Multiple actions can happen between frames, though often it will just be a combination of goto and one other action.
-- If the first frame starts with us already holding an object, it was already in our hands from the beginning. No `pickup` action happens before the first frame.
+- To be able to `put` something, we first need to `pick` it up (or start with it in our hands)
+- If we had something in hand in a frame, and it is not visible in the next frame, we must have performed a `put` action.
+- If we didn't have anything in hand in a frame, and something appears in our hands in the next frame, we must have performed a `pick` action
+- Slicing can only happen if we have a knife in our hands
+- Cleaning involes putting an object in a sink, running water over it, and then picking it back up
+- Heating involves putting an object in a microwave, turning the microwave on, turning it off, and then picking the object back up
+- Cooling involves putting an object in a fridge, closing the fridge, opening it, and then picking the object back up
+- Multiple actions can happen between frames, though MOST OFTEN it will just be a combination of goto and one other action. For example, it is unlikely we sliced AND put down the knife inbetween two frames.
 - You are bound not to recognize some objects correctly, which might hurt your peformance in downstream tasks. Instead of running with your first guess, try to list a few alternatives for an object if you're unsure what it is.
-- Whenever we hold a knife, we might be about to slice an object. If we hold a knife, pay very close attention to minute details in objects' appearance. If there are small lines in the object where there previously weren't any, it is likely that we have sliced it.
+- Whenever we hold a knife, we might be about to slice an object. If we hold a knife, pay very close attention to minute details in objects' appearance. If there are small lines in the object where there previously weren't any, it is likely that we have sliced it. But it might have been already sliced, or maybe we just do not plan to slice it, even though we hold a knife.
 - Sometimes, when putting down an object, we put it in or onto another object, instead of a container. In that case you should describe the object we put the object in or onto.
+- Similarly, sometimes we pick up an object that has another object in it. In that case, list both objects in your description.
 
 Example with the tips applied:
 
@@ -1038,45 +1046,47 @@ def trajectories_with_block_prefix(
     all_goto: dict[
         str, dict[tuple[str | None, str | None, str | None], list[HighLevelAction]]
     ],
+    seen: set,
 ):
     if len(current_blocks) == target_len:
         yield current_blocks
         return
 
-    next_blocks = []
+    next_blocks: list[tuple[str, list[HighLevelAction]]] = []
 
     if current_blocks:
         last_action = current_blocks[-1][-1]
         location, hand_content = last_action.end_location, last_action.end_hand_content
         for b in all_blocks.get((scene, hand_content), []):
-            a = b[0] if b[0].action != "GotoLocation" else b[1]
+            a = block_to_action(b)
             # The first added step in this trajectory has to be different
             # from the other first added steps in the other trajectories
-            if a in not_equal_to:
+            if a in not_equal_to or a in seen:
                 continue
+            seen.add(a)
 
             # If literally the same action is already in the trajectory, skip
             if any(a is other_a for block in current_blocks for other_a in block):
                 continue
 
             if b[0].beg_location == location:
-                next_blocks.append(b)
+                next_blocks.append((scene, b))
             else:
                 gotos = all_goto.get(scene, {}).get(
                     (location, a.beg_location, hand_content), []
                 )
                 for goto in gotos:
-                    next_blocks.append([goto] + b)
+                    next_blocks.append((scene, [goto] + b))
     else:
         for (s, _), l in all_blocks.items():
-            if s == scene:
-                for b in l:
-                    a = b[0] if b[0].action != "GotoLocation" else b[1]
-                    if a in not_equal_to:
-                        continue
-                    next_blocks.append(b)
+            for b in l:
+                a = block_to_action(b)
+                if a in not_equal_to or a in seen:
+                    continue
+                seen.add(a)
+                next_blocks.append((s, b))
 
-    for b in next_blocks:
+    for scene, b in next_blocks:
         new_trajectory = current_blocks + [b]
         yield from trajectories_with_block_prefix(
             current_blocks=new_trajectory,
@@ -1086,6 +1096,7 @@ def trajectories_with_block_prefix(
             scene=scene,
             all_blocks=all_blocks,
             all_goto=all_goto,
+            seen=set(),
         )
 
 
@@ -1117,7 +1128,7 @@ def compute_gotos(
 
 
 def block_to_action(block: list[HighLevelAction]) -> HighLevelAction:
-    return block[0] if block[0].action != "GotoLocation" else block[1]
+    return next(a for a in block if a.action != "GotoLocation")
 
 
 def remixed_task(
@@ -1136,33 +1147,41 @@ def remixed_task(
         if len(seed_block) == 1 and seed_block[0].action == "GotoLocation":
             continue
 
-        candidates = trajectories_with_block_prefix(
-            seed_blocks[:prefix_len].copy(),
-            target_len,
-            # The upcoming action should be different from all the other first actions
-            # among the trajectories with the same prefix length (and seed trajectory)
-            [
-                block_to_action(actions_to_blocks(t.actions)[prefix_len])
-                for t in trajectories_by_prefix_len.get(prefix_len, []) + [seed]
-            ],
-            seed.actions[0].scene,
-            all_blocks,
-            all_gotos,
-        )
-
         num_classes_limit = videos_on_prefix_0 if prefix_len == 0 else videos_per_prefix
         num_classes = 0
-        num_iters = 0
-        for trajectory in candidates:
-            num_iters += 1
-            if num_classes == num_classes_limit:
+        disallowed_continuations = [block_to_action(seed_blocks[prefix_len])]
+        seen = set()
+        while num_classes < num_classes_limit:
+            candidates = trajectories_with_block_prefix(
+                seed_blocks[:prefix_len].copy(),
+                target_len,
+                # The upcoming action should be different from all the other first actions
+                # among the trajectories with the same prefix length (and seed trajectory)
+                # We modify this list later so it's constatnly updating while the generator is being iterated through
+                disallowed_continuations,
+                seed.actions[0].scene,
+                all_blocks,
+                all_gotos,
+                seen,
+            )
+            if next(candidates, None) is None:
                 break
-            new_t = seed.with_modified_actions(from_action_blocks(trajectory))
-            if not equivalent_trajectory_present(
-                new_t, [t for l in trajectories_by_prefix_len.values() for t in l]
-            ):
-                trajectories_by_prefix_len.setdefault(prefix_len, []).append(new_t)
-                num_classes += 1
+
+            for trajectory in candidates:
+                if num_classes == num_classes_limit:
+                    break
+
+                new_t = seed.with_modified_actions(from_action_blocks(trajectory))
+
+                if not equivalent_trajectory_present(
+                    new_t, [t for l in trajectories_by_prefix_len.values() for t in l]
+                ):
+                    trajectories_by_prefix_len.setdefault(prefix_len, []).append(new_t)
+                    disallowed_continuations.append(
+                        block_to_action(trajectory[prefix_len])
+                    )
+                    num_classes += 1
+                    break
 
     return Task(
         prefix=f"level_{target_len}/remix",
