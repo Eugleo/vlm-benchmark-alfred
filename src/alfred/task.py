@@ -4,9 +4,10 @@ import random
 import uuid
 from collections import Counter
 from copy import deepcopy
-from typing import Optional
+from typing import Any, Generator, Optional
 
 import yaml
+from rich.progress import track
 
 from alfred import utils
 from alfred.object import plausible_action_objects
@@ -19,51 +20,22 @@ Your task is to describe what you see in each frame, separately, in a list. For 
 
 HIGH_LEVEL_TASK_EXAMPLE = """
 A few tips and hints to help you get started:
-- 'Holding an object' is depicted as the object being at the very bottom of the screen and VERY close to the camera, without any visible hands. Similarly, no hands are shown for cleaning, heating, or any other action.
-- If the object is at the very bottom and VERY close to the camera, it might just be lying somewhere, e.g. in a container that's positioned at the bottom of the screen.
-- If the first frame starts with us already holding an object, it was already in our hands from the beginning. No `pickup` action happens before the first frame.
-- The objects almost never lie on the floor. If the object is at the bottom of the screen and looks like it is lying on the floor, we are actually just holding it.
+- 'Holding an object' is depicted as the object being at the very bottom of the screen and close to the camera, without any visible hands. Similarly, no hands are shown for cleaning, heating, or any other action.
+- No action happens before the first frame. If the first frame starts with us already holding an object, it was already in our hands from the beginning.
+- The objects almost never lie on the floor. If the object is at the bottom of the screen, close to the camera and looks like it is lying on the floor, we are most likely just holding it.
 - The possible actions that can be performed are: pickup(object, location), put(object, location), heat(object, microwave), cool(object, fridge), clean(object, sink), slice(object), toggle(object), and goto(location). You should formulate your descriptions of what happened since the last frame based on these actions.
-- To be able to `put` something, we first need to `pick` it up (or start with it in our hands)
+- To be able to `put` something, we first need to `pick` it up (or start with it in our hands).
 - If we had something in hand in a frame, and it is not visible in the next frame, we must have performed a `put` action.
 - If we didn't have anything in hand in a frame, and something appears in our hands in the next frame, we must have performed a `pick` action
 - Slicing can only happen if we have a knife in our hands
-- Cleaning involes putting an object in a sink, running water over it, and then picking it back up
+- Cleaning involves putting an object in a sink, running water over it, and then picking it back up
 - Heating involves putting an object in a microwave, turning the microwave on, turning it off, and then picking the object back up
 - Cooling involves putting an object in a fridge, closing the fridge, opening it, and then picking the object back up
 - Multiple actions can happen between frames, though MOST OFTEN it will just be a combination of goto and one other action. For example, it is unlikely we sliced AND put down the knife inbetween two frames.
 - You are bound not to recognize some objects correctly, which might hurt your peformance in downstream tasks. Instead of running with your first guess, try to list a few alternatives for an object if you're unsure what it is.
-- Whenever we hold a knife, we might be about to slice an object. If we hold a knife, pay very close attention to minute details in objects' appearance. If there are small lines in the object where there previously weren't any, it is likely that we have sliced it. But it might have been already sliced, or maybe we just do not plan to slice it, even though we hold a knife.
-- Sometimes, when putting down an object, we put it in or onto another object, instead of a container. In that case you should describe the object we put the object in or onto.
+- Whenever we hold a knife, we might be about to slice an object. Pay very close attention to minute details in objects' appearance. If there are small lines in the object where there previously weren't any, it is likely that we have sliced it. But it might have been already sliced, or maybe we just do not plan to slice it, even though we hold a knife.
+- Sometimes, when putting down an object, we put it in or onto another object, instead of a container. In that case you should describe the object we put the object in or onto in addition to the general place this "container" is in.
 - Similarly, sometimes we pick up an object that has another object in it. In that case, list both objects in your description.
-
-Example with the tips applied:
-
-(note that this example is for five frames for illustration purposes, but you should work with as many frames as you are given)
-
-Input: [5 frames]
-
-Frame-by-frame description:
-1. Frame 1
-    - Scene: We are near a countertop, or possibly a large table. Multiple objects are visible on the countertop or table, among them a toaster, a butter knife, a laptop, and a mug.
-    - Holding: A circular dark object is at the bottom of the screen, suggesting we are holding it. It might be a bowl, a dark plate, or a pot.
-    - Actions since last frame: N/A, this is the first frame.
-2. Frame 2
-    - Scene: Near a sink. This suggests we have been at the countertop, not a table, previously. The sink is empty, but there is a sponge on the edge of the sink.
-    - Holding: The circular dark object is still at the bottom of the screen, so we are still holding it. We still aren't sure what it is.
-    - Actions since last frame: goto(sink).
-3. Frame 3
-    - Scene: Still near the sink. The sponge is still on the edge of the sink. There is a round black object in the sink with a long handle. It seems to be a pan.
-    - Holding: The circular dark object is no longer at the bottom of the screen, and we are not holding anything. This means we put it somewhere, probably in the sink.
-    - Actions since last frame: We have put the circular dark object in the sink. Since there appears to be a pan in the sink, we now know that the circular dark object has been a pan, not a bowl or a pot. We have done put(pan, sink).
-4. Frame 4
-    - Scene: Still near the sink. The water is running, suggesting we are cleaning the pan.
-    - Holding: We are not holding anything.
-    - Actions since last frame: clean(pan, sink).
-5. Frame 5
-    - Scene: We are now near a bed, or possibly a couch or an armchair. We see a pillow.
-    - Holding: It appears that a green rectangular object is lying on the floor near the bottom of the screen, which means we are holding it. It might be a book, or a green sponge. We are not sure where we picked it up.
-    - Actions since last frame: goto(bed), pickup(book, *) or possibly pickup(sponge, *). It is likely that we have picked up the green object in the previous location, where we saw a sponge. This would suggest we actually did pickup(sponge, sink) or pickup(sponge, countertop).
 """
 
 
@@ -186,7 +158,27 @@ def write_config(tasks, output_dir):
         config = {
             "tasks": tasks,
             "models": [
-                {"kind": "gpt", "model": "gpt-4o", "async_batch": True, "n_frames": 5},
+                {
+                    "kind": "gpt",
+                    "model": "gpt-4o",
+                    "async_batch": False,
+                    "n_frames": 16,
+                    "is_one_shot": True,
+                },
+                {
+                    "kind": "gpt",
+                    "model": "gpt-4o",
+                    "async_batch": False,
+                    "n_frames": 16,
+                    "is_one_shot": False,
+                },
+                {
+                    "kind": "gpt",
+                    "model": "gpt-4o",
+                    "async_batch": False,
+                    "n_frames": 5,
+                    "is_one_shot": False,
+                },
                 {"kind": "encoder", "encoder": "s3d", "heads": [{"kind": "cosine"}]},
                 {"kind": "encoder", "encoder": "viclip", "heads": [{"kind": "cosine"}]},
                 {
@@ -195,6 +187,14 @@ def write_config(tasks, output_dir):
                     "heads": [{"kind": "cosine"}],
                     "hf_model": "ViT-bigG-14/laion2b_s39b_b160k",
                     "n_frames": 4,
+                },
+                {
+                    "kind": "encoder",
+                    "encoder": "clip",
+                    "heads": [{"kind": "cosine"}],
+                    "hf_model": "ViT-bigG-14/laion2b_s39b_b160k",
+                    "n_frames": 32,
+                    "batch_size": 1,
                 },
             ],
             "task_dir": "tasks/alfred",
@@ -270,9 +270,10 @@ Your task is to describe what you see in each frame, separately, in a list. The 
 def example_object(container):
     return f"""
 A few tips and hints to help you get started:
-- 'Holding an object' is depicted as the object being at the bottom of the screen, without any visible hands.
-- The objects almost never lie on the floor. If the object is at the bottom of the screen and looks like it is lying on the floor, we are actually just holding it.
+- 'Holding an object' is depicted as the object being at the very bottom of the screen and close to the camera, without any visible hands. Similarly, no hands are shown for cleaning, heating, or any other action.
+- The objects almost never lie on the floor. If the object is at the bottom of the screen, close to the camera and looks like it is lying on the floor, we are most likely just holding it.
 - You are bound not to recognize some objects correctly, which might hurt your peformance in downstream tasks. Instead of running with your first guess, try to list a few alternatives for an object if you're unsure what it is.
+- If we didn't have anything in hand in a frame, and something appears in our hands in the next frame, we must have performed a `pick` action
 
 Example with the tips applied:
 
@@ -284,8 +285,8 @@ Frame-by-frame description:
 1. We are in the middle of the room. We do not see the {container} yet.
 2. The location has changed. We see something that might be the {container}. We see a multitude of objects there, among them a toaster, a butter knife, a laptop, and a mug, and a pan or possibly a bowl.
 2. The scene has not changed much since the last frame. We are still near the {container}.
-3. We see a rectangular object at the bottom of the screen, suggesting we are holding it. Considering the selection of objects on the {container} we saw above, it is likely the laptop.
-4. The angle has changed a bit and we indeed see that the laptop is still on the {container}. This means the thing we hold must be the toaster.
+3. We see a rectangular object at the bottom of the screen, suggesting we are holding it. Considering the selection of objects on the {container} we saw above, it is likely the laptop or the toaster.
+4. The angle has changed a bit and we see that the laptop is still on the {container}. This means the thing we hold must be the toaster, based on our previous observations.
 5. We are now a bit further away from the {container}. We are still holding the toaster.
 """.strip()
 
@@ -328,14 +329,6 @@ def object_tasks(trajectories: list[Trajectory]) -> list[Task]:
     return tasks
 
 
-# Assistant:
-# 1. We are near the countertop.
-# 2. We see a multitude of objects on the countertop, among them a toaster, a butter knife, a laptop, and a mug.
-# 3. We are now holding the laptop, since it is at the bottom of the screen.
-# 4. We are still holding the laptop. We are now walking away from the countertop.
-# 5. We are now a bit further away from the countertop. We are still holding the laptop.
-
-
 def prompt_container(object):
     return f"""
 Your task is to describe what you see in each frame, separately, in a list. The frames will depict us putting down a {object} somewhere. Your eventual goal will be to recognize the place or container we put the object in (or on), but you shouldn't lock-in to one answer too early. Instead, try to describe the place or container as accurately as possible separately for each frame, refining your answer as you see more frames.
@@ -345,8 +338,8 @@ Your task is to describe what you see in each frame, separately, in a list. The 
 def example_container(object):
     return f"""
 A few tips and hints to help you get started:
-- 'Holding an object' is depicted as the object being at the bottom of the screen, without any visible hands.
-- The objects almost never lie on the floor. If the object is at the bottom of the screen and looks like it is lying on the floor, we are actually just holding it.
+- 'Holding an object' is depicted as the object being at the very bottom of the screen and close to the camera, without any visible hands. Similarly, no hands are shown for cleaning, heating, or any other action.
+- The objects almost never lie on the floor. If the object is at the bottom of the screen, close to the camera and looks like it is lying on the floor, we are most likely just holding it.
 - You are bound not to recognize some objects correctly, which might hurt your peformance in downstream tasks. Instead of running with your first guess, try to list a few alternatives for an object if you're unsure what it is.
 
 Example with the tips applied:
@@ -358,9 +351,8 @@ Input: [5 frames]
 Frame-by-frame description:
 1. We are in the middle of the room. We do not see any {object} yet.
 2. The location has changed. We see something that might be the {object}. It seems to be in a pot which itself is on a sofa.
-2. The scene has not changed much since the last frame. We are still near the sofa.
-Considering the descriptions above, it is likely that the {object} was picked up from a pot, or possibly from a sofa.
-4. Not much has changed, we are still near the sofa, and we still hold the {object},
+2. The scene has not changed much since the last frame. We are still near the sofa. The {object} is in the bottom of the frame and close to the camera, suggesting we are holding it now. Considering the descriptions above, it is likely that the {object} was picked up from a pot, or possibly from a sofa.
+4. Not much has changed, we are still near the sofa, and we still hold the {object}.
 5. We are now a bit further away from the sofa. We are still holding the {object}.
 """.strip()
 
@@ -412,10 +404,9 @@ The frames will depict us carrying a {object} to a sink and then possibly cleani
 def example_cleaning(object):
     return f"""
 A few tips and hints to help you get started:
-- 'Holding an object' is depicted as the object being at the bottom of the screen, without any visible hands.
-- Similarly, no hands are shown for cleaning, heating, or any other action.
-- The objects almost never lie on the floor. If the object is at the bottom of the screen and looks like it is lying on the floor, we are actually just holding it.
-- Cleaning an object involves holding it, putting it in a sink, running the water over it, stopping the water, and picking the object back up. Proper cleaning needs to have all these parts
+- 'Holding an object' is depicted as the object being at the very bottom of the screen and close to the camera, without any visible hands. Similarly, no hands are shown for cleaning, heating, or any other action.
+- The objects almost never lie on the floor. If the object is at the bottom of the screen, close to the camera and looks like it is lying on the floor, we are most likely just holding it.
+- Proper cleaning involves putting an object in a sink, running water over it, and then picking it back up
 
 Example with the tips applied:
 
@@ -476,10 +467,9 @@ Your task is to describe what you see in each frame, separately, in a list. The 
 def example_heating(object):
     return f"""
 A few tips and hints to help you get started:
-- 'Holding an object' is depicted as the object being at the bottom of the screen, without any visible hands.
-- Similarly, no hands are shown for cleaning, heating, or any other action.
-- The objects almost never lie on the floor. If the object is at the bottom of the screen and looks like it is lying on the floor, we are actually just holding it.
-- Heating an object involves holding it, opening a microwave, putting it in a microwave, closing the microwave, turning the microwave on, turning it off, opening it, and picking the object back up. Proper heating needs to have all these parts.
+- 'Holding an object' is depicted as the object being at the very bottom of the screen and close to the camera, without any visible hands. Similarly, no hands are shown for cleaning, heating, or any other action.
+- The objects almost never lie on the floor. If the object is at the bottom of the screen, close to the camera and looks like it is lying on the floor, we are most likely just holding it.
+- Proper heating involves putting an object in a microwave, closing the door, turning the microwave on, turning it off, opening the door and then picking the object back up
 - When the microwave is turned on, it lights up
 
 Example with the tips applied:
@@ -490,7 +480,7 @@ Input: [5 frames]
 
 Frame-by-frame description:
 1. We are near the countertop. There is a {object} at the bottom of the screen, which suggests we are holding it.
-2. We are now near a microwave. The {object} is still at the bottom of the screen, so we are definitely holding it.
+2. We are now near a microwave. The {object} is still at the bottom of the screen, so we are still holding it.
 3. The {object} now lies in the microwave. The microwave is open and thus not running, so we are not heating the {object} up yet.
 4. The {object} is still in the microwave. The microwave is still open.
 5. We are holding the {object} again, as depicted by it being at the bottom of the screen again. Although it was in the microwave, we didn't close the microwave and turn it on, which means we did not clean it.
@@ -569,9 +559,6 @@ def heat_tasks(trajectories: list[Trajectory]) -> list[Task]:
     return tasks
 
 
-# Assistant:
-
-
 def prompt_cooling(object):
     return f"""
 Your task is to describe what you see in each frame, separately, in a list. The frames will depict us carrying a {object} to a fridge and then possibly cooling it by leaving it in a closed fridge for a while before picking it up again. Your eventual goal will be to discern whether all the steps required for cooling the object actually happened, but you shouldn't lock-in to one answer too early. Instead, for each frame, concisely describe the scene, the objects we're holding, and what actions have likely been performed since the last frame.
@@ -581,9 +568,8 @@ Your task is to describe what you see in each frame, separately, in a list. The 
 def example_cooling(object):
     return f"""
 A few tips and hints to help you get started:
-- 'Holding an object' is depicted as the object being at the bottom of the screen, without any visible hands.
-- Similarly, no hands are shown for cleaning, heating, or any other action.
-- The objects almost never lie on the floor. If the object is at the bottom of the screen and looks like it is lying on the floor, we are actually just holding it.
+- 'Holding an object' is depicted as the object being at the very bottom of the screen and close to the camera, without any visible hands. Similarly, no hands are shown for cleaning, heating, or any other action.
+- The objects almost never lie on the floor. If the object is at the bottom of the screen, close to the camera and looks like it is lying on the floor, we are most likely just holding it.
 - Cooling an object involves holding it, opening the fridge, putting it in a fridge, closing the fridge, opening the fridge, and picking the object back up. Proper cooling needs to have all these parts.
 
 Example with the tips applied:
@@ -676,11 +662,10 @@ Your task is to describe what you see in each frame, separately, in a list. The 
 def example_toggle(object):
     return f"""
 A few tips and hints to help you get started:
-- 'Holding an object' is depicted as the object being at the bottom of the screen, without any visible hands.
-- Similarly, no hands are shown for toggling, or any other action.
-- The objects almost never lie on the floor. If the object is at the bottom of the screen and looks like it is lying on the floor, we are actually just holding it.
-- We might be carrying an object in the frames, but what we care about mostly is turning other objects on or off.
-- The state of the {object} will change exactly once.
+- 'Holding an object' is depicted as the object being at the very bottom of the screen and close to the camera, without any visible hands. Similarly, no hands are shown for cleaning, heating, or any other action.
+- The objects almost never lie on the floor. If the object is at the bottom of the screen, close to the camera and looks like it is lying on the floor, we are most likely just holding it.
+- We might be carrying an object in the frames, but what we care about the most is turning other objects on or off.
+- The state of the {object} will change exactly once in the frames, from on to off or vice versa.
 
 Example with the tips applied:
 
@@ -690,9 +675,9 @@ Input: [5 frames]
 
 Frame-by-frame description:
 1. We are near the countertop. We see a {object} in front of us.
-2. The {object} doesn't seem to be turned on; there is a red light on the front that signals it is off.
+2. The {object} doesn't seem to be turned on.
 3. Nothing has changed; the {object} is still off.
-4. Now, the {object} is turned on. We can see this because it the light has turned on.
+4. Now, the {object} is turned on. We can see this because it the light inside has turned on.
 5. The {object} is still on.
 """
 
@@ -755,11 +740,12 @@ Your task is to describe what you see in each frame, separately, in a list. The 
 def example_pick(object):
     return f"""
 A few tips and hints to help you get started:
-- 'Holding an object' is depicted as the object being at the bottom of the screen, without any visible hands.
-- Similarly, no hands are shown for putting an object down, or any other action.
-- The objects almost never lie on the floor. If the object is at the bottom of the screen and looks like it is lying on the floor, we are actually just holding it.
-- Sometimes it is hard to see where exactly we put the object. However, if we held it and we don't, we definitely had to put it somewhere.
+- 'Holding an object' is depicted as the object being at the very bottom of the screen and close to the camera, without any visible hands. Similarly, no hands are shown for cleaning, heating, or any other action.
+- The objects almost never lie on the floor. If the object is at the bottom of the screen, close to the camera and looks like it is lying on the floor, we are most likely just holding it.
+- Sometimes it is hard to see where exactly we put the object. However, if we held it in a frame and we don't hold it in the next frame, we definitely had to put it somewhere.
 - We will never pick up an object and put it down in the same frame. Only exactly one of these will happen.
+- Sometimes, when putting down an object, we put it in or onto another object, instead of a container. In that case you should describe the object we put the object in or onto in addition to the general place this "container" is in.
+- Similarly, sometimes we pick up an object that has another object in it. In that case, list both objects in your description.
 
 Example with the tips applied:
 
@@ -813,10 +799,10 @@ Your task is to describe what you see in each frame, separately, in a list. The 
 def example_slicing(object):
     return f"""
 A few tips and hints to help you get started:
-- 'Holding an object' is depicted as the object being at the bottom of the screen, without any visible hands.
-- Similarly, no hands are shown for putting an object down, or any other action.
-- The objects almost never lie on the floor. If the object is at the bottom of the screen and looks like it is lying on the floor, we are actually just holding it.
+- 'Holding an object' is depicted as the object being at the very bottom of the screen and close to the camera, without any visible hands. Similarly, no hands are shown for cleaning, heating, or any other action, not even slicing.
+- The objects almost never lie on the floor. If the object is at the bottom of the screen, close to the camera and looks like it is lying on the floor, we are most likely just holding it.
 - Sometimes we just walk to an object with a knife in hand without slicing the object. To see whether an object has been sliced, first find it in the frame, and then observe how it changes in the following frames. A sliced object will have small, barely noticeable lines on it.
+- Whenever we hold a knife, we might be about to slice an object. Pay very close attention to minute details in objects' appearance. If there are small lines in the object where there previously weren't any, it is likely that we have sliced it. But it might have been already sliced, or maybe we just do not plan to slice it, even though we hold a knife.
 
 Example with the tips applied:
 
@@ -870,9 +856,8 @@ Your task is to describe what you see in each frame, separately, in a list. The 
 def example_sliced_v_whole(object):
     return f"""
 A few tips and hints to help you get started:
-- 'Holding an object' is depicted as the object being at the bottom of the screen, without any visible hands.
-- Similarly, no hands are shown for picking an object up, or any other action.
-- The objects almost never lie on the floor. If the object is at the bottom of the screen and looks like it is lying on the floor, we are actually just holding it.
+- 'Holding an object' is depicted as the object being at the very bottom of the screen and close to the camera, without any visible hands. Similarly, no hands are shown for cleaning, heating, or any other action.
+- The objects almost never lie on the floor. If the object is at the bottom of the screen, close to the camera and looks like it is lying on the floor, we are most likely just holding it.
 - We are sure that you will observe a {object} being picked up. If you can barely see it, maybe you just picked up a very thin slice that is angled weirdly.
 - Sometimes we will pick up slices, sometimes wedges, but you can usually ignore this, as long as you can tell whether the object is whole or not.
 
@@ -929,9 +914,8 @@ Your task is to describe what you see in each frame, separately, in a list. The 
 def example_on_v_off(object):
     return f"""
 A few tips and hints to help you get started:
-- 'Holding an object' is depicted as the object being at the bottom of the screen, without any visible hands.
-- Similarly, no hands are shown for putting an object down, or any other action.
-- The objects almost never lie on the floor. If the object is at the bottom of the screen and looks like it is lying on the floor, we are actually just holding it.
+- 'Holding an object' is depicted as the object being at the very bottom of the screen and close to the camera, without any visible hands. Similarly, no hands are shown for cleaning, heating, or any other action.
+- The objects almost never lie on the floor. If the object is at the bottom of the screen, close to the camera and looks like it is lying on the floor, we are most likely just holding it.
 - Sometimes the {object} will be barely visible in the frame. Still, you should be able to discern whether it is shining (and thus on) or not.
 
 Example with the tips applied:
@@ -1037,67 +1021,60 @@ def equivalent_trajectory_present(
     return False
 
 
-def trajectories_with_block_prefix(
-    current_blocks: list[list[HighLevelAction]],
-    target_len: int,
-    not_equal_to: list[HighLevelAction],
-    scene: str,
+def find_next_block(
+    current: list[list[HighLevelAction]],
     all_blocks: dict[tuple[str, str | None], list[list[HighLevelAction]]],
-    all_goto: dict[
+    all_gotos: dict[
         str, dict[tuple[str | None, str | None, str | None], list[HighLevelAction]]
     ],
-    seen: set,
-):
-    if len(current_blocks) == target_len:
-        yield current_blocks
-        return
-
-    next_blocks: list[tuple[str, list[HighLevelAction]]] = []
-
-    if current_blocks:
-        last_action = current_blocks[-1][-1]
-        location, hand_content = last_action.end_location, last_action.end_hand_content
-        for b in all_blocks.get((scene, hand_content), []):
-            a = block_to_action(b)
-            # The first added step in this trajectory has to be different
-            # from the other first added steps in the other trajectories
-            if a in not_equal_to or a in seen:
-                continue
-            seen.add(a)
-
-            # If literally the same action is already in the trajectory, skip
-            if any(a is other_a for block in current_blocks for other_a in block):
-                continue
-
-            if b[0].beg_location == location:
-                next_blocks.append((scene, b))
-            else:
-                gotos = all_goto.get(scene, {}).get(
-                    (location, a.beg_location, hand_content), []
-                )
-                for goto in gotos:
-                    next_blocks.append((scene, [goto] + b))
+) -> Generator[list[HighLevelAction], Any, None]:
+    if not current:
+        yield from (b for l in all_blocks.values() for b in l)
     else:
-        for (s, _), l in all_blocks.items():
-            for b in l:
-                a = block_to_action(b)
-                if a in not_equal_to or a in seen:
-                    continue
-                seen.add(a)
-                next_blocks.append((s, b))
-
-    for scene, b in next_blocks:
-        new_trajectory = current_blocks + [b]
-        yield from trajectories_with_block_prefix(
-            current_blocks=new_trajectory,
-            target_len=target_len,
-            # The next step can be anything now, just the first step had to be different
-            not_equal_to=[],
-            scene=scene,
-            all_blocks=all_blocks,
-            all_goto=all_goto,
-            seen=set(),
+        last = current[-1][-1]
+        blocks = all_blocks.get((last.scene, last.end_hand_content), [])
+        random.shuffle(blocks)
+        blocks = sorted(
+            blocks, key=lambda b: block_to_action(b).action != "ToggleObject"
         )
+
+        for next_block in blocks:
+            next_location = next_block[0].beg_location
+            if next_location == last.end_location:
+                yield next_block
+            else:
+                if gotos := all_gotos.get(last.scene, {}).get(
+                    (last.end_location, next_location, last.end_hand_content), []
+                ):
+                    yield [random.choice(gotos)] + next_block
+
+
+def find_remaining_blocks(
+    current: list[list[HighLevelAction]],
+    target_len: int,
+    all_blocks: dict[tuple[str, str | None], list[list[HighLevelAction]]],
+    all_gotos: dict[
+        str, dict[tuple[str | None, str | None, str | None], list[HighLevelAction]]
+    ],
+) -> list[list[HighLevelAction]] | None:
+    assert len(current) > 0
+
+    if len(current) == target_len:
+        return current
+
+    for next_block in find_next_block(current, all_blocks, all_gotos):
+        action = block_to_action(next_block)
+        if any(action == other_a for block in current for other_a in block):
+            continue
+
+        return find_remaining_blocks(
+            current=current + [next_block],
+            target_len=target_len,
+            all_blocks=all_blocks,
+            all_gotos=all_gotos,
+        )
+
+    return None
 
 
 def compute_blocks(
@@ -1135,62 +1112,47 @@ def remixed_task(
     seed: Trajectory,
     videos_on_prefix_0: int,
     videos_per_prefix: int,
-    trajectories: list[Trajectory],
+    all_trajectories: list[Trajectory],
 ) -> Task:
-    all_blocks = compute_blocks(trajectories)
-    all_gotos = compute_gotos(trajectories)
-
+    all_blocks = compute_blocks(all_trajectories)
+    all_gotos = compute_gotos(all_trajectories)
     seed_blocks = actions_to_blocks(seed.actions)
     target_len = len(seed_blocks)
-    trajectories_by_prefix_len = {target_len: [seed]}
-    for prefix_len, seed_block in enumerate(seed_blocks):
-        if len(seed_block) == 1 and seed_block[0].action == "GotoLocation":
-            continue
 
-        num_classes_limit = videos_on_prefix_0 if prefix_len == 0 else videos_per_prefix
-        num_classes = 0
-        disallowed_continuations = [block_to_action(seed_blocks[prefix_len])]
-        seen = set()
-        while num_classes < num_classes_limit:
-            candidates = trajectories_with_block_prefix(
-                seed_blocks[:prefix_len].copy(),
-                target_len,
-                # The upcoming action should be different from all the other first actions
-                # among the trajectories with the same prefix length (and seed trajectory)
-                # We modify this list later so it's constatnly updating while the generator is being iterated through
-                disallowed_continuations,
-                seed.actions[0].scene,
-                all_blocks,
-                all_gotos,
-                seen,
-            )
-            if next(candidates, None) is None:
+    trajectories = {target_len: [seed]}
+    for prefix_len in range(target_len - 1, -1, -1):
+        prefix = seed_blocks[:prefix_len]
+        target_count = videos_on_prefix_0 if prefix_len == 0 else videos_per_prefix
+        for next_block in find_next_block(prefix, all_blocks, all_gotos):
+            # We have enough trajectories for this prefix length
+            if len(trajectories.get(prefix_len, [])) == target_count:
                 break
+            flat_trajectories = [t for l in trajectories.values() for t in l]
+            # The first step in the trajectory has to be different from others
+            if any(
+                block_to_action(next_block)
+                == block_to_action(actions_to_blocks(t.actions)[prefix_len])
+                for t in flat_trajectories
+            ):
+                continue
 
-            for trajectory in candidates:
-                if num_classes == num_classes_limit:
-                    break
-
-                new_t = seed.with_modified_actions(from_action_blocks(trajectory))
-
-                if not equivalent_trajectory_present(
-                    new_t, [t for l in trajectories_by_prefix_len.values() for t in l]
-                ):
-                    trajectories_by_prefix_len.setdefault(prefix_len, []).append(new_t)
-                    disallowed_continuations.append(
-                        block_to_action(trajectory[prefix_len])
-                    )
-                    num_classes += 1
-                    break
+            blocks = find_remaining_blocks(
+                prefix + [next_block], target_len, all_blocks, all_gotos
+            )
+            if blocks is None:
+                continue
+            trajectory = seed.with_modified_actions(from_action_blocks(blocks))
+            assert not equivalent_trajectory_present(trajectory, flat_trajectories)
+            trajectories.setdefault(prefix_len, []).append(trajectory)
 
     return Task(
         prefix=f"level_{target_len}/remix",
         name=str(uuid.uuid4()),
-        trajectories=[t for l in trajectories_by_prefix_len.values() for t in l],
+        trajectories=[t for l in trajectories.values() for t in l],
         metadata={
             "prefix_lens": [
                 {"shared_prefix": prefix_len, "description": t.description}
-                for prefix_len, trajectories in trajectories_by_prefix_len.items()
+                for prefix_len, trajectories in trajectories.items()
                 for t in trajectories
             ]
         },
@@ -1263,10 +1225,6 @@ def permutation_task(
             new_trajectory, consistent_trajectories + inconsistent_trajectories
         ):
             if slicing_consistent(list(perm)):
-                # if "we slice" not in perm[0].description:
-                #     for a in perm:
-                #         print(a.description)
-                #     print()
                 consistent_trajectories.append(new_trajectory)
             else:
                 inconsistent_trajectories.append(new_trajectory)

@@ -10,6 +10,7 @@ from pathlib import Path
 from alfred import utils
 from alfred.task import (
     Task,
+    actions_to_blocks,
     clean_tasks,
     container_tasks,
     cool_tasks,
@@ -26,6 +27,7 @@ from alfred.task import (
 )
 from alfred.trajectory import shorten_trajectories
 from plotnine import *
+from rich import print as rprint
 
 utils.set_seed(42)
 
@@ -85,16 +87,60 @@ for t in limit(sliced_v_whole_tasks(trajectories)):
 for t in limit(on_v_off_tasks(trajectories)):
     tasks.append(t.write(benchmark_path))
 
-# %%
+
+toggle_scenes = set(
+    t.actions[0].scene
+    for t in trajectories
+    if any(a.action == "ToggleObject" for a in t.actions)
+)
+tasks = []
+
 permutation_tasks_per_level = 33
 num_classes = 3
-for level in range(4, 9):
+for level in range(2, 3):
     level_num_classes = min(num_classes, math.factorial(level))
     groups = groups_per_level[level]
     random.shuffle(groups)
 
-    consistent_candidates, inconsistent_candidates = [], []
+    groups = groups_per_level[level]
+    normal_groups, toggle_groups = [], []
     for g in groups:
+        if any(a.scene in toggle_scenes for a in g[0].actions):
+            toggle_groups.append(g)
+        else:
+            normal_groups.append(g)
+    random.shuffle(toggle_groups)
+    random.shuffle(normal_groups)
+
+    candidates = {}
+
+    consistent_candidates, inconsistent_candidates = [], []
+    for g in toggle_groups:
+        seed = [t for t in g if t.actions[0].scene in toggle_scenes][0]
+        try:
+            task = permutation_task(g[0], level_num_classes, trajectories)
+        except:
+            continue
+        if len(task.trajectories) == level_num_classes:
+            assert task.metadata is not None
+            if task.metadata["is_consistent_wrt_slicing"]:
+                consistent_candidates.append(task)
+            else:
+                inconsistent_candidates.append(task)
+        if len(consistent_candidates) >= 8:
+            break
+
+    g = sorted(
+        groups,
+        key=lambda g: not any(
+            t.action in ["HeatObject", "CoolObject", "CoolObject"] for t in g[0].actions
+        ),
+    )
+
+    for g in groups:
+        seed = random.choice(g)
+        num_results = len(consistent_candidates + inconsistent_candidates)
+
         try:
             task = permutation_task(g[0], level_num_classes, trajectories)
         except:
@@ -123,11 +169,11 @@ for level in range(4, 9):
         :permutation_tasks_per_level
     ]:
         name = task.write(benchmark_path)
+        rprint([t.description for t in task.trajectories])
         tasks.append(name)
         print(name)
 
-# %%
-tasks = []
+
 videos_per_task = 8
 
 level_to_num_videos = {
@@ -145,37 +191,46 @@ assert all(
     for level, (a, b) in level_to_num_videos.items()
 )
 
-
 remix_tasks_per_level = 12
 
-for level in range(5, 9):
+for level in range(2, 9):
+    videos_for_prefix_0, videos_per_prefix = level_to_num_videos[level]
     groups = groups_per_level[level]
-    random.shuffle(groups)
+    normal_groups, toggle_groups = [], []
+    for g in groups:
+        if any(a.scene in toggle_scenes for a in g[0].actions):
+            toggle_groups.append(g)
+        else:
+            normal_groups.append(g)
+    random.shuffle(toggle_groups)
+    random.shuffle(normal_groups)
 
     candidates = {}
-    for g in groups:
-        group_candidates: list[Task] = []
-        for seed in g:
-            # Half of the tasks will not have slicing mixed in
-            # because we want to see other actions used, too
-            # if len(candidates.get(videos_per_task + 1, [])) % 2 == 0:
-            #     all_trajectories = [
-            #         t
-            #         for t in trajectories
-            #         if not any(a.action == "SliceObject" for a in t.actions)
-            #     ]
-            # else:
-            #     all_trajectories = trajectories
 
-            videos_for_prefix_0, videos_per_prefix = level_to_num_videos[level]
-            task = remixed_task(
-                seed, videos_for_prefix_0, videos_per_prefix, trajectories
-            )
-            group_candidates.append(task)
-            if len(task.trajectories) == videos_per_task + 1:
-                break
+    for g in toggle_groups:
+        seed = [t for t in g if t.actions[0].scene in toggle_scenes][0]
+        task = remixed_task(seed, videos_for_prefix_0, videos_per_prefix, trajectories)
+        candidates.setdefault(len(task.trajectories), []).append(task)
+        if len(candidates.get(videos_per_task + 1, [])) >= 3:
+            break
 
-        task = next(t for t in sorted(group_candidates, key=lambda t: -len(t.trajectories)))
+    for g in toggle_groups + normal_groups:
+        g = sorted(g, key=lambda t: t.actions[0].scene not in toggle_scenes)
+        seed = g[0]
+        num_results = len(candidates.get(videos_per_task + 1, []))
+
+        if num_results <= 6:
+            if not any(a.action == "HeatObject" for a in seed.actions):
+                continue
+        elif num_results <= 9:
+            if not any(a.action == "CoolObject" for a in seed.actions):
+                continue
+        elif num_results <= 12:
+            if not any(a.action == "CleanObject" for a in seed.actions):
+                continue
+
+        task = remixed_task(seed, videos_for_prefix_0, videos_per_prefix, trajectories)
+
         # +1 because we have 8 remixed classes on top of the 1 original class
         candidates.setdefault(len(task.trajectories), []).append(task)
         if len(candidates.get(videos_per_task + 1, [])) >= remix_tasks_per_level:
@@ -195,12 +250,13 @@ for level in range(5, 9):
     )
 
     for task in final_candidates[:remix_tasks_per_level]:
-        name = task.write(Path("test"))
+        name = task.write(benchmark_path)
+        rprint([t.description for t in task.trajectories])
         tasks.append(name)
         print(name)
 
-# %%
-write_config(tasks, Path("test"))
+
+write_config(tasks, benchmark_path)
 
 # %%
 task = remixed_task(groups_per_level[4][0][0], 2, 2, trajectories)
